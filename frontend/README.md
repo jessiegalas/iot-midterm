@@ -1,4 +1,4 @@
-# DEFUSE / React + Vite prototype
+# Dont Stop Talking / React + Vite prototype
 
 A browser simulation of the repository's ESP32 game. The Arduino sketch is unchanged.
 
