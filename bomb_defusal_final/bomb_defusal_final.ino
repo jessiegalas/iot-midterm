@@ -160,6 +160,132 @@ unsigned long lastWarnBeepMillis = 0;
 const int PANIC_SECONDS   = 3;    // switch to a continuous tone at this point
 
 // ====================================================================
+// HOST LINK (USB serial, 115200 baud) - used by the web frontend
+// ====================================================================
+// Every machine-readable line the device prints starts with '@' so the web app
+// can tell it apart from the human debug text. The game rules are NOT changed:
+// the device stays in charge, the web page just mirrors it (and can press
+// keypad keys / start the game for you).
+//
+// Device -> host (one line each):
+//   @HELLO,1                                   protocol version (boot, and after SYNC)
+//   @IDLE                                      title screen
+//   @READY,level,missingWireMask,secs          waiting for wires + A (level = the one about to start)
+//   @LEVEL,level,code,reqWireMask,cards,secs   level started; cards look like 1:5
+//   @ENTRY,digits                              digits typed so far
+//   @CODE,OK   |   @CODE,BAD,wrongTries
+//   @WIRE,index,OK   |   @WIRE,index,BAD
+//   @CLEAR,level                               level cleared
+//   @TIME,secs                                 once per second while playing
+//   @PROGRESS,entry,solved,wrong,pulledMask    only as part of a SYNC reply
+//   @WON,secs   |   @LOST,CODE|WIRE|TIME
+// Host -> device (end each line with a newline):
+//   SYNC     re-send HELLO plus the current state
+//   START    start a new game (same as D on the keypad), from any state
+//   RESET    abort back to the title screen
+//   ARM      same as pressing A (only works when every wire is seated)
+//   KEY,x    same as pressing keypad key x  (0-9 * # A B C D)
+// Wire index 0/1/2 = RED/BLACK/BLUE. In masks, bit i is wire i.
+char hostBuf[16];
+byte hostLen = 0;
+bool hostSkip = false;   // true while throwing away an over-long line
+char hostKey = 0;        // key injected by the web page; acts like a keypad press
+
+// Physical keypad first, then a key sent from the web page.
+char readKey() {
+  char k = keypad.getKey();
+  if (!k && hostKey) { k = hostKey; hostKey = 0; }
+  return k;
+}
+
+void sendHello() { Serial.println("@HELLO,1"); }
+
+void sendEntry() {
+  Serial.print("@ENTRY,"); Serial.println(codeBuffer);
+}
+
+void sendReady(byte missing) {
+  Serial.print("@READY,"); Serial.print(level); Serial.print(',');
+  Serial.print(missing); Serial.print(','); Serial.println(timeLeft);
+}
+
+void sendLevel() {
+  byte reqMask = 0;
+  for (int i = 0; i < requiredCount; i++) reqMask |= (1 << requiredColors[i]);
+  Serial.print("@LEVEL,"); Serial.print(level); Serial.print(',');
+  for (int i = 0; i < 4; i++) Serial.print(secretCode[i]);
+  Serial.print(','); Serial.print(reqMask); Serial.print(',');
+  for (int i = 0; i < requiredCount; i++) {
+    if (i) Serial.print(':');
+    Serial.print(assignedCards[i]);
+  }
+  Serial.print(','); Serial.println(timeLeft);
+}
+
+void sendProgress() {
+  byte pulled = 0;
+  for (int i = 0; i < 3; i++) if (wireCounted[i]) pulled |= (1 << i);
+  Serial.print("@PROGRESS,"); Serial.print(codeBuffer); Serial.print(',');
+  Serial.print(codeSolved ? 1 : 0); Serial.print(',');
+  Serial.print(wrongCodeTries); Serial.print(','); Serial.println(pulled);
+}
+
+// Lets a web page that connects in the middle of a game catch up.
+void sendSnapshot() {
+  switch (state) {
+    case GAME_READY:   sendReady(missingWiresMask()); break;
+    case GAME_PLAYING: sendLevel(); sendProgress(); break;
+    default:           Serial.println("@IDLE"); break;   // idle, or a finished game
+  }
+}
+
+void resetToIdle() {
+  state = GAME_IDLE;
+  hostKey = 0;
+  noTone(BUZZER_PIN);
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_GREEN, LOW);
+  showIdleScreen();
+  Serial.println("@IDLE");
+}
+
+void runHostCommand(const char* cmd) {
+  if (strcmp(cmd, "SYNC") == 0) {
+    sendHello();
+    sendSnapshot();
+  } else if (strcmp(cmd, "START") == 0) {
+    hostKey = 0;
+    startGame();
+  } else if (strcmp(cmd, "RESET") == 0) {
+    resetToIdle();
+  } else if (strcmp(cmd, "ARM") == 0) {
+    hostKey = 'A';
+  } else if (strncmp(cmd, "KEY,", 4) == 0 && cmd[4] != '\0' && cmd[5] == '\0') {
+    if (strchr("0123456789*#ABCD", cmd[4])) hostKey = cmd[4];
+  }
+}
+
+// Collects characters from the USB serial port; runs each complete line.
+void pollHost() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      if (!hostSkip && hostLen > 0) {
+        hostBuf[hostLen] = '\0';
+        runHostCommand(hostBuf);
+      }
+      hostLen = 0;
+      hostSkip = false;
+    } else if (hostLen < sizeof(hostBuf) - 1) {
+      hostBuf[hostLen++] = c;
+    } else {
+      hostSkip = true;
+    }
+  }
+}
+
+// ====================================================================
 void setup() {
   Serial.begin(115200);
   pinMode(SERVO_PIN, OUTPUT);
@@ -185,17 +311,20 @@ void setup() {
   randomSeed(esp_random());
 
   showIdleScreen();
+  sendHello();
+  Serial.println("@IDLE");
 }
 
 // ====================================================================
 // Start / reset: the D key on the keypad. The onboard BOOT button (GPIO0) still
 // works too, as a backup in case the keypad ever misbehaves.
 bool startPressed() {
-  char k = keypad.getKey();
+  char k = readKey();
   return (k == 'D') || (digitalRead(START_BUTTON) == LOW);
 }
 
 void loop() {
+  pollHost();   // commands from the web page (does nothing if no one is connected)
   switch (state) {
     case GAME_IDLE:
       if (startPressed()) {
@@ -222,11 +351,7 @@ void loop() {
     case GAME_LOST:
       if (startPressed()) {
         delay(250);
-        state = GAME_IDLE;
-        noTone(BUZZER_PIN);
-        digitalWrite(LED_RED, LOW);
-        digitalWrite(LED_GREEN, LOW);
-        showIdleScreen();
+        resetToIdle();
       }
       break;
 
@@ -297,18 +422,20 @@ void generateLevel(int lvl) {
 }
 
 void handleKeypad() {
-  char k = keypad.getKey();
+  char k = readKey();
   if (!k) return;
 
   if (k == '*') {
     codeBufLen = 0;
     codeBuffer[0] = '\0';
+    sendEntry();
   } else if (k >= '0' && k <= '9') {
     if (codeBufLen < 4) {
       codeBuffer[codeBufLen++] = k;
       codeBuffer[codeBufLen] = '\0';
     }
     tone(BUZZER_PIN, 1200, 40);
+    sendEntry();
   } else if (k == '#') {
     if (codeBufLen == 4) {
       bool match = true;
@@ -318,17 +445,20 @@ void handleKeypad() {
       if (match) {
         codeSolved = true;
         tone(BUZZER_PIN, 2000, 150);
+        Serial.println("@CODE,OK");
       } else {
         wrongCodeTries++;
         tone(BUZZER_PIN, 300, 300);
+        Serial.print("@CODE,BAD,"); Serial.println(wrongCodeTries);
         if (wrongCodeTries >= 3) {
-          explode("WRONG CODE 3X");
+          explode("WRONG CODE 3X", "CODE");
           return;
         }
       }
     }
     codeBufLen = 0;
     codeBuffer[0] = '\0';
+    sendEntry();
   }
 
   checkLevelComplete();
@@ -347,8 +477,10 @@ void handleWires() {
       if (isRequired) {
         wiresPulledCorrect++;
         tone(BUZZER_PIN, 1800, 100);
+        Serial.print("@WIRE,"); Serial.print(i); Serial.println(",OK");
       } else {
-        explode("WRONG WIRE PULLED");
+        Serial.print("@WIRE,"); Serial.print(i); Serial.println(",BAD");
+        explode("WRONG WIRE PULLED", "WIRE");
         return;
       }
     }
@@ -359,6 +491,7 @@ void handleWires() {
 void checkLevelComplete() {
   if (state != GAME_PLAYING) return;
   if (codeSolved && wiresPulledCorrect >= requiredCount) {
+    Serial.print("@CLEAR,"); Serial.println(level);
     if (level >= 3) {
       winGame();
     } else {
@@ -376,9 +509,10 @@ void handleTimer() {
     lastTickMillis += 1000;
     timeLeft--;
     if (timeLeft <= 0) {
-      explode("TIME'S UP");
+      explode("TIME'S UP", "TIME");
       return;
     }
+    Serial.print("@TIME,"); Serial.println(timeLeft);
   }
   updateWarningBeep();
 }
@@ -401,8 +535,10 @@ void updateWarningBeep() {
   }
 }
 
-void explode(const char* reason) {
+// `reason` is shown on the OLED; `tag` (CODE, WIRE or TIME) goes to the web page.
+void explode(const char* reason, const char* tag) {
   state = GAME_LOST;
+  Serial.print("@LOST,"); Serial.println(tag);   // before the slow balloon pop below
   digitalWrite(LED_RED, HIGH);
   digitalWrite(LED_GREEN, LOW);
   tone(BUZZER_PIN, 200, 2000);
@@ -424,6 +560,7 @@ void explode(const char* reason) {
 
 void winGame() {
   state = GAME_WON;
+  Serial.print("@WON,"); Serial.println(timeLeft);
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_RED, LOW);
   tone(BUZZER_PIN, 1500, 200);
@@ -512,8 +649,9 @@ void handleReady() {
   if (missing != lastReadyMask) {          // redraw only when something changed
     lastReadyMask = missing;
     drawReadyScreen(missing);
+    sendReady(missing);
   }
-  char k = keypad.getKey();
+  char k = readKey();
   if (k == 'A') {
     if (missing == 0) beginLevel();
     else tone(BUZZER_PIN, 300, 300);       // refused: a wire is still out
@@ -528,6 +666,7 @@ void beginLevel() {
   lastTickMillis = millis();   // the clock only runs while a level is actually being played
   lastWarnBeepMillis = 0;
   state = GAME_PLAYING;
+  sendLevel();
 }
 
 void flashMessage(const char* msg, int ms) {
@@ -598,16 +737,20 @@ void updatePlayingScreen() {
     Rows -> GPIO13, 14, 27, 26
     Cols -> GPIO25, 33, 32, 4
 
-  6 defusal wires (each: one end into GPIO pin's breadboard row,
-  other end into the GND rail):
+  3 defusal wires (each: one end into GPIO pin's breadboard row,
+  other end into the GND rail). These match wirePins[] in the code:
     RED    -> GPIO5
-    BLACK  -> GPIO16
-    BLUE   -> GPIO17
-    YELLOW -> GPIO18
-    GREEN  -> GPIO19
-    WHITE  -> GPIO23
+    BLACK  -> GPIO18
+    BLUE   -> GPIO19
   (Internal pull-ups are enabled in code, so no external resistors
   are needed. Pin reads LOW while the wire is seated, HIGH once pulled.)
+
+  Balloon-popper servo signal -> GPIO23 (see SERVO_PIN)
+
+  USB serial (115200 baud): the web frontend talks to the board over the
+  same USB cable used for uploading - see "HOST LINK" above. Close the
+  Arduino Serial Monitor before connecting the web page (only one program
+  can use the port at a time).
 
   Buzzer (passive piezo): + -> GPIO15, - -> GND
   Red LED (through 220ohm resistor): anode -> GPIO12
