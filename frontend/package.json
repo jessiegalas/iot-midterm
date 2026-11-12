@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "node --test src/game.test.js"
+    "test": "node --test src/game.test.js src/device.test.js"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.3.0",
