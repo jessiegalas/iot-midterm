@@ -1,8 +1,12 @@
 /*
-  *** FINAL VERSION: all 3 levels + title screens + balloon-popper servo (GPIO23). ***
+  COMPLETE VERSION: 3 levels + servo + USB Serial + Wi-Fi WebSocket + OTA uploads.
   - The titles shown on the OLED are set in the "Titles" section near the top.
   - Servo settings are in the "Balloon-popper servo" section.
-  - Set SERVO_ENABLED to false to test the game without moving the servo.
+  - Set SERVO_ENABLED to false while testing without the balloon mechanism.
+  - Set your 2.4 GHz Wi-Fi SSID and password below (or leave placeholders for USB only).
+  - Set a unique OTA_PASSWORD below to enable authenticated wireless uploads.
+  - OTA requires an OTA-capable partition layout and one initial upload by USB/serial,
+    unless compatible OTA firmware is already running on your board.
 
   ====================================================================
   TWO-PLAYER BOMB DEFUSAL MINIGAME - ESP32 (classic DevKit V1)
@@ -26,6 +30,7 @@
     - "Keypad" by Chris--A / Mark Stanley
     - "Adafruit SSD1306"
     - "Adafruit GFX Library"
+    - "WebSockets" by Markus Sattler (Links2004)
   Board package: "esp32" by Espressif Systems
   Board selection in Arduino IDE: "ESP32 Dev Module"
   ====================================================================
@@ -35,6 +40,29 @@
 #include <Keypad.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <WiFi.h>                // bundled with ESP32 board package
+#include <ArduinoOTA.h>          // bundled with ESP32 board package
+#include <WebSocketsServer.h>    // WebSockets library by Markus Sattler
+
+// ---------------- Wi-Fi / WebSocket settings ----------------
+// Standard ESP32 DevKit V1 supports 2.4 GHz Wi-Fi (not 5 GHz-only networks).
+// Credentials are intentionally not embedded in the distributed sketch.
+const char* WIFI_SSID = "5ig169_2.4G";
+const char* WIFI_PASSWORD = "wlan9665";
+const uint16_t WEBSOCKET_PORT = 81;
+WebSocketsServer webSocket(WEBSOCKET_PORT);
+
+// ---------------- Authenticated Arduino OTA settings ----------------
+// CHANGE THIS before uploading. A password is required so anyone on the same
+// network cannot flash new code without permission. Do NOT reuse Wi-Fi password.
+// If left as the placeholder below, OTA stays disabled (USB/WebSocket still work).
+const char* OTA_HOSTNAME = "esp32-bomb-defusal";
+const char* OTA_PASSWORD = "123456789";
+const char* OTA_PASSWORD_PLACEHOLDER = "123456789";
+
+bool otaStarted = false;
+bool otaInProgress = false;
+bool otaPasswordWarningShown = false;
 
 // ---------------- OLED ----------------
 #define SCREEN_WIDTH 128
@@ -53,7 +81,7 @@ char keys[ROWS][COLS] = {
   {'*','0','#','D'}
 };
 byte rowPins[ROWS] = {13, 14, 27, 26};
-byte colPins[COLS] = {25, 33, 32, 4};
+byte colPins[COLS] = {25, 32, 33, 4};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 // ---------------- Buzzer / LEDs / Start button ----------------
@@ -72,7 +100,7 @@ const char* LEVEL_SUBTITLES[3] = {"Warm-up", "Getting hot", "Sudden death"};
 
 // ---------------- Balloon-popper servo ----------------
 #define SERVO_PIN 23                  // servo signal wire (orange / yellow)
-const bool SERVO_ENABLED = true;      // false = servo NEVER moves (use this while testing!)
+const bool SERVO_ENABLED = true;     // change to true ONLY when the servo is safely mounted
 const int  REST_ANGLE    = 0;         // needle pulled back, away from the balloon
 const int  POP_ANGLE     = 90;        // swing size: 90 or 180 (try 90 first)
 const int  POP_JABS      = 2;         // number of jabs (2 = a second chance to pop)
@@ -107,7 +135,7 @@ void popBalloon() {
 }
 
 
-// ---------------- The 6 defusal wires ----------------
+// ---------------- The 3 defusal wires ----------------
 const char* colorNames[3] = {"RED", "BLACK", "BLUE"};
 const int   wirePins[3]   = {5, 18, 19};
 bool wireBaseline[3];      // state recorded at the start of each level (should be LOW = wire present)
@@ -135,6 +163,7 @@ const char* morseDigits[10] = {
 // otherwise collide with a plain "IDLE" here.
 enum GameState { GAME_IDLE, GAME_READY, GAME_PLAYING, GAME_LEVEL_CLEARED, GAME_WON, GAME_LOST };
 GameState state = GAME_IDLE;
+const char* lastLossTag = "TIME"; // used to re-sync web clients after a loss
 
 int level = 1;
 int secretCode[4];
@@ -160,82 +189,175 @@ unsigned long lastWarnBeepMillis = 0;
 const int PANIC_SECONDS   = 3;    // switch to a continuous tone at this point
 
 // ====================================================================
-// HOST LINK (USB serial, 115200 baud) - used by the web frontend
+// USB Serial + Wi-Fi WebSocket bridge (same commands/events on both transports)
 // ====================================================================
-// Every machine-readable line the device prints starts with '@' so the web app
-// can tell it apart from the human debug text. The game rules are NOT changed:
-// the device stays in charge, the web page just mirrors it (and can press
-// keypad keys / start the game for you).
-//
-// Device -> host (one line each):
-//   @HELLO,1                                   protocol version (boot, and after SYNC)
-//   @IDLE                                      title screen
-//   @READY,level,missingWireMask,secs          waiting for wires + A (level = the one about to start)
-//   @LEVEL,level,code,reqWireMask,cards,secs   level started; cards look like 1:5
-//   @ENTRY,digits                              digits typed so far
-//   @CODE,OK   |   @CODE,BAD,wrongTries
-//   @WIRE,index,OK   |   @WIRE,index,BAD
+// Device -> host (all lines start with '@'):
+//   @HELLO,1                                   protocol version
+//   @IDLE                                      idle/title screen
+//   @READY,level,missingWireMask,secs          waiting for wires and A
+//   @LEVEL,level,code,reqWireMask,cards,secs   level started
+//   @ENTRY,digits                              typed code
+//   @CODE,OK | @CODE,BAD,wrongTries            code result
+//   @WIRE,index,OK | @WIRE,index,BAD           wire result
 //   @CLEAR,level                               level cleared
-//   @TIME,secs                                 once per second while playing
-//   @PROGRESS,entry,solved,wrong,pulledMask    only as part of a SYNC reply
-//   @WON,secs   |   @LOST,CODE|WIRE|TIME
-// Host -> device (end each line with a newline):
-//   SYNC     re-send HELLO plus the current state
-//   START    start a new game (same as D on the keypad), from any state
-//   RESET    abort back to the title screen
-//   ARM      same as pressing A (only works when every wire is seated)
-//   KEY,x    same as pressing keypad key x  (0-9 * # A B C D)
-// Wire index 0/1/2 = RED/BLACK/BLUE. In masks, bit i is wire i.
+//   @TIME,secs                                 time remaining
+//   @PROGRESS,entry,solved,wrong,pulledMask    current level snapshot
+//   @WON,secs | @LOST,CODE|WIRE|TIME           final result
+// Host -> device (Serial: newline terminated; WebSocket: plain text frame):
+//   SYNC | START | RESET | ARM | KEY,x
+// Wire indices 0/1/2 = RED/BLACK/BLUE; masks use bit i for wire i.
+// WebSocket URL: ws://<ESP32-IP>:81/ (use Serial Monitor at 115200 to find IP).
+// USB Serial continues to work without Wi-Fi.
+
+// OTA is serviced from loop() without blocking gameplay.
+// While firmware is being updated, game handling is suspended so flash writes
+// are not interrupted by game/servo operations.
+
+// Explicit prototypes make function references reliable in Arduino IDE.
+void showIdleScreen();
+void startGame();
+void enterReady();
+void beginLevel();
+void handleReady();
+void handleKeypad();
+void handleWires();
+void handleTimer();
+void updateWarningBeep();
+void updatePlayingScreen();
+void checkLevelComplete();
+void flashMessage(const char* msg, int ms);
+void explode(const char* reason, const char* tag);
+void winGame();
+byte missingWiresMask();
+
 char hostBuf[16];
 byte hostLen = 0;
-bool hostSkip = false;   // true while throwing away an over-long line
-char hostKey = 0;        // key injected by the web page; acts like a keypad press
+bool hostSkip = false;
+char hostKey = 0;
 
-// Physical keypad first, then a key sent from the web page.
+void broadcastEvent(const String& msg) {
+  Serial.println(msg);
+  if (WiFi.status() == WL_CONNECTED) {
+    String outbound = msg;  // broadcastTXT accepts a mutable String in some versions
+    webSocket.broadcastTXT(outbound);
+  }
+}
+
+void connectWiFi() {
+  if (strcmp(WIFI_SSID, "YOUR_2_4_GHZ_WIFI_SSID") == 0 || WIFI_SSID[0] == '\0') {
+    Serial.println("WiFi not configured; USB Serial mode is available.");
+    return;
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to 2.4 GHz WiFi");
+  unsigned long began = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - began < 10000UL) {
+    delay(250);
+    Serial.print('.');
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("\nESP32 IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("WebSocket: ws://");
+    Serial.print(WiFi.localIP());
+    Serial.print(':');
+    Serial.println(WEBSOCKET_PORT);
+  } else {
+    Serial.println("\nWiFi unavailable; USB Serial mode stays active.");
+  }
+}
+
+// Start authenticated OTA as soon as Wi-Fi becomes available. This also handles
+// connecting after the initial 10-second Wi-Fi attempt in setup() times out.
+void serviceOTA() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  if (!otaStarted) {
+    if (OTA_PASSWORD[0] == '\0' ||
+        strcmp(OTA_PASSWORD, OTA_PASSWORD_PLACEHOLDER) == 0 ||
+        strlen(OTA_PASSWORD) < 8) {
+      if (!otaPasswordWarningShown) {
+        Serial.println("OTA disabled: set a unique OTA_PASSWORD of 8+ characters in the sketch.");
+        otaPasswordWarningShown = true;
+      }
+      return;
+    }
+
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+    ArduinoOTA.onStart([]() {
+      otaInProgress = true;
+      noTone(BUZZER_PIN);
+      digitalWrite(SERVO_PIN, LOW);  // avoid servo pulses during the update
+      Serial.println("OTA update started. Keep ESP32 powered.");
+    });
+    ArduinoOTA.onEnd([]() {
+      Serial.println("OTA complete. Rebooting.");
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+      Serial.printf("OTA error: %u\n", (unsigned int)error);
+      otaInProgress = false;
+      lastTickMillis = millis(); // resume game clock without counting upload time
+    });
+    ArduinoOTA.begin();
+    otaStarted = true;
+    Serial.print("OTA available as: ");
+    Serial.print(OTA_HOSTNAME);
+    Serial.print(" at ");
+    Serial.println(WiFi.localIP());
+  }
+
+  ArduinoOTA.handle();
+}
+
+// The physical keypad has priority; the next queued remote key is used otherwise.
 char readKey() {
   char k = keypad.getKey();
   if (!k && hostKey) { k = hostKey; hostKey = 0; }
   return k;
 }
 
-void sendHello() { Serial.println("@HELLO,1"); }
+void sendHello() { broadcastEvent("@HELLO,1"); }
 
 void sendEntry() {
-  Serial.print("@ENTRY,"); Serial.println(codeBuffer);
+  broadcastEvent(String("@ENTRY,") + codeBuffer);
 }
 
 void sendReady(byte missing) {
-  Serial.print("@READY,"); Serial.print(level); Serial.print(',');
-  Serial.print(missing); Serial.print(','); Serial.println(timeLeft);
+  broadcastEvent("@READY," + String(level) + "," + String((unsigned int)missing) + "," + String(timeLeft));
 }
 
 void sendLevel() {
   byte reqMask = 0;
   for (int i = 0; i < requiredCount; i++) reqMask |= (1 << requiredColors[i]);
-  Serial.print("@LEVEL,"); Serial.print(level); Serial.print(',');
-  for (int i = 0; i < 4; i++) Serial.print(secretCode[i]);
-  Serial.print(','); Serial.print(reqMask); Serial.print(',');
+  String msg = "@LEVEL," + String(level) + ",";
+  for (int i = 0; i < 4; i++) msg += String(secretCode[i]);
+  msg += "," + String((unsigned int)reqMask) + ",";
   for (int i = 0; i < requiredCount; i++) {
-    if (i) Serial.print(':');
-    Serial.print(assignedCards[i]);
+    if (i) msg += ':';
+    msg += String(assignedCards[i]);
   }
-  Serial.print(','); Serial.println(timeLeft);
+  msg += "," + String(timeLeft);
+  broadcastEvent(msg);
 }
 
 void sendProgress() {
   byte pulled = 0;
   for (int i = 0; i < 3; i++) if (wireCounted[i]) pulled |= (1 << i);
-  Serial.print("@PROGRESS,"); Serial.print(codeBuffer); Serial.print(',');
-  Serial.print(codeSolved ? 1 : 0); Serial.print(',');
-  Serial.print(wrongCodeTries); Serial.print(','); Serial.println(pulled);
+  broadcastEvent(String("@PROGRESS,") + codeBuffer + "," +
+                 String(codeSolved ? 1 : 0) + "," +
+                 String(wrongCodeTries) + "," + String((unsigned int)pulled));
 }
 
-// Lets a web page that connects in the middle of a game catch up.
 void sendSnapshot() {
   switch (state) {
     case GAME_READY:   sendReady(missingWiresMask()); break;
     case GAME_PLAYING: sendLevel(); sendProgress(); break;
-    default:           Serial.println("@IDLE"); break;   // idle, or a finished game
+    case GAME_WON:     broadcastEvent("@WON," + String(timeLeft)); break;
+    case GAME_LOST:    broadcastEvent(String("@LOST,") + lastLossTag); break;
+    default:           broadcastEvent("@IDLE"); break;
   }
 }
 
@@ -246,7 +368,7 @@ void resetToIdle() {
   digitalWrite(LED_RED, LOW);
   digitalWrite(LED_GREEN, LOW);
   showIdleScreen();
-  Serial.println("@IDLE");
+  broadcastEvent("@IDLE");
 }
 
 void runHostCommand(const char* cmd) {
@@ -265,8 +387,25 @@ void runHostCommand(const char* cmd) {
   }
 }
 
-// Collects characters from the USB serial port; runs each complete line.
+void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  if (type == WStype_CONNECTED) {
+    sendHello();
+    sendSnapshot();
+  } else if (type == WStype_TEXT) {
+    char cmd[16];
+    if (length >= sizeof(cmd)) return;  // reject overlong commands
+    memcpy(cmd, payload, length);
+    cmd[length] = '\0';
+    while (length > 0 && (cmd[length - 1] == '\r' || cmd[length - 1] == '\n')) {
+      cmd[--length] = '\0';
+    }
+    if (length > 0) runHostCommand(cmd);
+  }
+}
+
+// Read both transports on every pass through loop().
 void pollHost() {
+  webSocket.loop();
   while (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '\r') continue;
@@ -277,6 +416,8 @@ void pollHost() {
       }
       hostLen = 0;
       hostSkip = false;
+    } else if (hostSkip) {
+      continue;  // discard the rest of an overlong command
     } else if (hostLen < sizeof(hostBuf) - 1) {
       hostBuf[hostLen++] = c;
     } else {
@@ -310,9 +451,14 @@ void setup() {
 
   randomSeed(esp_random());
 
+  connectWiFi();
+  serviceOTA(); // advertise OTA if already connected and password is configured
+  webSocket.begin();
+  webSocket.onEvent(onWebSocketEvent);
+
   showIdleScreen();
   sendHello();
-  Serial.println("@IDLE");
+  broadcastEvent("@IDLE");
 }
 
 // ====================================================================
@@ -324,7 +470,12 @@ bool startPressed() {
 }
 
 void loop() {
-  pollHost();   // commands from the web page (does nothing if no one is connected)
+  serviceOTA(); // service authenticated network uploads on every iteration
+  if (otaInProgress) {
+    delay(1);   // suspend game handling until OTA succeeds or fails
+    return;
+  }
+  pollHost();   // USB Serial + Wi-Fi WebSocket commands
   switch (state) {
     case GAME_IDLE:
       if (startPressed()) {
@@ -383,7 +534,7 @@ void generateLevel(int lvl) {
   wrongCodeTries = 0;
   codeSolved = false;
 
-  // 2) pick `lvl` correct wire colors out of 6, no repeats
+  // 2) pick `lvl` correct wire colors out of 3, no repeats
   int pool[3] = {0, 1, 2};
   for (int i = 2; i > 0; i--) { // shuffle
     int j = random(0, i + 1);
@@ -445,11 +596,11 @@ void handleKeypad() {
       if (match) {
         codeSolved = true;
         tone(BUZZER_PIN, 2000, 150);
-        Serial.println("@CODE,OK");
+        broadcastEvent("@CODE,OK");
       } else {
         wrongCodeTries++;
         tone(BUZZER_PIN, 300, 300);
-        Serial.print("@CODE,BAD,"); Serial.println(wrongCodeTries);
+        broadcastEvent("@CODE,BAD," + String(wrongCodeTries));
         if (wrongCodeTries >= 3) {
           explode("WRONG CODE 3X", "CODE");
           return;
@@ -477,9 +628,9 @@ void handleWires() {
       if (isRequired) {
         wiresPulledCorrect++;
         tone(BUZZER_PIN, 1800, 100);
-        Serial.print("@WIRE,"); Serial.print(i); Serial.println(",OK");
+        broadcastEvent("@WIRE," + String(i) + ",OK");
       } else {
-        Serial.print("@WIRE,"); Serial.print(i); Serial.println(",BAD");
+        broadcastEvent("@WIRE," + String(i) + ",BAD");
         explode("WRONG WIRE PULLED", "WIRE");
         return;
       }
@@ -491,7 +642,7 @@ void handleWires() {
 void checkLevelComplete() {
   if (state != GAME_PLAYING) return;
   if (codeSolved && wiresPulledCorrect >= requiredCount) {
-    Serial.print("@CLEAR,"); Serial.println(level);
+    broadcastEvent("@CLEAR," + String(level));
     if (level >= 3) {
       winGame();
     } else {
@@ -512,7 +663,7 @@ void handleTimer() {
       explode("TIME'S UP", "TIME");
       return;
     }
-    Serial.print("@TIME,"); Serial.println(timeLeft);
+    broadcastEvent("@TIME," + String(timeLeft));
   }
   updateWarningBeep();
 }
@@ -538,7 +689,8 @@ void updateWarningBeep() {
 // `reason` is shown on the OLED; `tag` (CODE, WIRE or TIME) goes to the web page.
 void explode(const char* reason, const char* tag) {
   state = GAME_LOST;
-  Serial.print("@LOST,"); Serial.println(tag);   // before the slow balloon pop below
+  lastLossTag = tag;
+  broadcastEvent(String("@LOST,") + tag);   // before the slow balloon pop below
   digitalWrite(LED_RED, HIGH);
   digitalWrite(LED_GREEN, LOW);
   tone(BUZZER_PIN, 200, 2000);
@@ -560,7 +712,7 @@ void explode(const char* reason, const char* tag) {
 
 void winGame() {
   state = GAME_WON;
-  Serial.print("@WON,"); Serial.println(timeLeft);
+  broadcastEvent("@WON," + String(timeLeft));
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_RED, LOW);
   tone(BUZZER_PIN, 1500, 200);
@@ -691,12 +843,15 @@ void updatePlayingScreen() {
   display.print("LEVEL "); display.print(level);
   display.print("  TIME ");
   int mm = timeLeft / 60; int ss = timeLeft % 60;
-  if (mm < 10) display.print("0"); display.print(mm); display.print(":");
-  if (ss < 10) display.print("0"); display.print(ss);
+  if (mm < 10) display.print("0");
+  display.print(mm);
+  display.print(":");
+  if (ss < 10) display.print("0");
+  display.print(ss);
 
   display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
 
-  // Morse code, one digit per line
+  // Morse patterns, displayed on a single line
   display.setCursor(0, 14);
   display.print("CODE:");
   display.setCursor(0, 24);
@@ -747,10 +902,14 @@ void updatePlayingScreen() {
 
   Balloon-popper servo signal -> GPIO23 (see SERVO_PIN)
 
-  USB serial (115200 baud): the web frontend talks to the board over the
-  same USB cable used for uploading - see "HOST LINK" above. Close the
-  Arduino Serial Monitor before connecting the web page (only one program
-  can use the port at a time).
+  USB Serial (115200 baud) and Wi-Fi WebSocket (port 81) share the same protocol.
+  OTA uses ArduinoOTA on the local network (separate from WebSocket port 81).
+  Arduino IDE: Tools > Partition Scheme must select a scheme with OTA slots;
+  avoid "Huge APP (No OTA)". Set OTA_PASSWORD before first OTA-enabled upload.
+  The very first OTA-enabled sketch must normally be flashed through USB/serial.
+  For USB/Web Serial, close Arduino Serial Monitor before opening the web app.
+  For Wi-Fi, connect your web app to ws://ESP32_IP:81/ on the same network.
+  Classic ESP32 DevKit V1 needs a 2.4 GHz network. USB works without Wi-Fi.
 
   Buzzer (passive piezo): + -> GPIO15, - -> GND
   Red LED (through 220ohm resistor): anode -> GPIO12
