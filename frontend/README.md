@@ -2,33 +2,35 @@
 
 The ESP32 owns the hardware game and its countdown. A Node.js bridge serves the React console on the laptop and connects to the board over local Wi-Fi or USB. The separate browser simulation still uses one, two, and three wires across its three levels.
 
+For a fresh PC and an existing ESP32, use the [Windows setup guide](../SETUP.md).
+
 ## Run the laptop console
 
 From the `frontend` folder on Windows, with Node.js 24 installed:
 
 ```powershell
 npm.cmd ci
-npm.cmd test
-npm.cmd run build
-npm.cmd start
+npm.cmd run dev
 ```
 
-Open [the laptop console](http://localhost:5173) and choose **Connect Players**. Select **Use ESP32** in Mission Control first when playing with the board. The live console stays on the laptop. For simulation development, run `npm.cmd run dev` while the bridge is stopped and use manual player entry.
+Open the console URL printed in the terminal and choose **Connect Players**. Select **Use ESP32** in Mission Control to play with the board. The console stays on the laptop. Development mode builds the phone pages at startup. For a production run, use `npm.cmd run build` followed by `npm.cmd start`. Stop the server with Ctrl+C.
+
+The console prefers port 5173 and the phone listener prefers 5174. If a port is occupied, the server prints the fallback address. Set `DEFUSE_CONSOLE_PORT` or `DEFUSE_JOIN_PORT` to require a specific port.
 
 ## Connect players
 
 1. Open **Connect Players** on the laptop. Connect both phones to the same local network and scan the QR code for each role. If the laptop has multiple network adapters, use the lobby’s network selector to choose the one the phones can reach.
-2. Each phone asks for a player name and confirms the assigned role. Each name replaces its QR code on the laptop as soon as the player joins. If scanning is unavailable, open **Manual entry** and save either or both names from the laptop.
+2. Each phone asks for a player name and confirms the assigned role. Each name replaces its QR code on the laptop. The Expert can open the manual after joining. Use **Retry QR**, **Copy Join Link**, or **Manual entry** if scanning is unavailable.
 3. Select **Start Game** after both names appear. The leaderboard uses the two names together as the team name.
 
-Phone onboarding uses TCP port 5174 on the laptop’s local network. Allow that port on the private network if Windows Firewall blocks the join pages. Some guest networks block connections between devices. Manual entry works without phone connectivity.
+Allow the phone port shown in the terminal through Windows Firewall on the private network if needed. Both phones need to be on the laptop’s local network. Some guest networks isolate devices. Manual entry works without phone connectivity.
 
 ## Pair the board and set up USB backup
 
 1. Find the ESP32's COM port in Device Manager or Arduino IDE. Connect the cable before starting the bridge and close Arduino Serial Monitor so the bridge can keep the port open.
 2. Copy `server/bridge.example.json` to `server/bridge.local.json`. Set `serialPort` to the COM port. For USB-only operation, remove the entire `wifi` object.
 3. For Wi-Fi, generate a pairing key locally with `node -p "require('node:crypto').randomBytes(32).toString('hex')"`. Put it in `wifi.key`, and copy `bomb_defusal_final/bridge_local.example.h` to `bomb_defusal_final/bridge_local.h`. Enter the same key and identity in the header, plus the 2.4 GHz Wi-Fi credentials and the laptop's local IPv4 address. Both local configuration files are ignored by Git. Replace the previously embedded Wi-Fi password if it is still in use.
-4. Put the laptop and ESP32 on the same LAN. Use a stable address for the laptop and allow inbound TCP 8443 for Node.js on your private network. The optional `wifi.bind` setting limits the listener to a specific local address. The board initiates the authenticated TLS connection. The browser uses loopback port 5173.
+4. Put the laptop and ESP32 on the same LAN. Use a stable address for the laptop and allow inbound TCP 8443 for Node.js on your private network. The optional `wifi.bind` setting limits the listener to a specific local address. The board initiates the authenticated TLS connection. The console stays on the printed loopback address.
 5. In Arduino IDE, open `bomb_defusal_final/bomb_defusal_final.ino`. Use **esp32 by Espressif Systems 4.0.0**, select **ESP32 Dev Module** for the standard ESP32 DevKit, and install the **Keypad**, **Adafruit GFX Library**, and **Adafruit SSD1306** libraries. Flash over USB while the bridge is stopped. Older firmware is incompatible with the current bridge.
 6. Start the bridge and check for **USB READY** in the console before play. A healthy Wi-Fi connection is preferred before a run. A dead link switches to a ready cable after three missed heartbeats or a disconnect. A recovered Wi-Fi link waits for the current USB run to finish. A WAN outage with working local Wi-Fi leaves the active link in place.
 
@@ -36,9 +38,13 @@ The countdown continues on the ESP32 during connection loss. If both links drop,
 
 ## Play
 
-Connect or enter both player names. In hardware mode, seat all five wires and arm with the on-screen button or physical **A** key. The Defuser relays Morse clues and card numbers, and the Expert uses the manual. The hardware picks one to five distinct wires each level. The countdown is shared across all three levels and pauses while the wires are reseated. A successful run is saved to the laptop browser's existing local leaderboard.
+Connect or enter both player names. In hardware mode, seat all five wires and arm with the on-screen button or physical **A** key. The Defuser relays Morse clues and card numbers, and the Expert uses the manual. The hardware picks one to five distinct wires each level. The countdown is shared across all three levels and pauses while the wires are reseated. Scores and confirmed hardware rosters are saved in `frontend/.data/defuse.sqlite`.
+
+The leaderboard imports existing scores when opened at their old browser address. If the address changed, open **Transfer browser scores** at the original address to export JSON, then import it on the new console. If the original address still serves an older console without an export button, copy the result of `localStorage.getItem('defuse.scores.v1')` from that page's developer console into a JSON file and import the file.
 
 The Expert can open the console's **Expert manual** on the laptop or use the printable references below on another screen. The live bridge does not require internet access.
+
+Use **Enable sound** on the laptop to play Hot Roadway. The 160 BPM loop switches to the 175 BPM version at 30 seconds remaining. Both tracks pause between levels. Flash the updated sketch to align the ESP32 buzzer to the same beat.
 
 ### Morse reference
 
@@ -62,8 +68,10 @@ Read one group per digit from left to right. Preserve leading zeros.
 | 7, 8 | White |
 | 9, 10 | Purple |
 
-## Check failover on the actual setup
+## Verify physical hardware
 
-With the board powered and USB ready, start a run over Wi-Fi and enter part of a code. Cut WAN access while leaving the LAN up and confirm the Wi-Fi link stays active. Then disconnect the board's local Wi-Fi while leaving USB connected. Within four seconds, confirm the console shows USB, the same code entry, and the board's current time. Repeat at the ready and result screens, and confirm the leaderboard saves a win only once. Test startup with USB alone, loss of both links, and a board reboot separately.
+Use the [physical verification checklist](../HARDWARE_VERIFICATION.md) with the ESP32 and two phones.
 
 The board sends protocol 2 frames over USB at 115200 baud and directly over TLS on Wi-Fi. The bridge uses `SYNC` and `PING` to check links, `TAKE` to select the command transport, and `CMD` with a per-command ID. The board replies with `@HELLO`, `@TAKEN`, `@ACK`, and revisioned `@STATE` snapshots. The console consumes `GET /api/events` and sends commands through `POST /api/commands`.
+
+Updated firmware also sends an optional `@MUSIC` timing frame before each playing snapshot. The bridge accepts it only when the boot, run, revision, and elapsed seconds match the active snapshot.

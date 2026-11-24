@@ -3,10 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": { "node": "24.x" },
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "node server/start.js --dev",
     "build": "vite build",
-    "start": "node server/index.js",
+    "start": "node server/start.js",
     "preview": "vite preview --host 0.0.0.0",
     "test": "node --test"
   },

@@ -58,3 +58,21 @@ test('malformed or unavailable local storage cannot break loading', () => {
   for(const value of ['not json','{}','[null,{},1]'])assert.deepEqual(loadScores({getItem:()=>value}),[]);
   assert.deepEqual(loadScores({getItem:()=>{throw new Error('denied');}}),[]);
 });
+test('final keypad and wire inputs use the deadline even when a timer tick is delayed', () => {
+  let game = { ...start(), level: 3 };
+  const wire = game.round.required[0];
+  for (const digit of game.round.code) game = gameReducer(game, { type: 'KEY', key: digit, now: 1100 });
+  const readyForKey = gameReducer(game, { type: 'WIRE', index: wire, now: 1200 });
+  const readyForWire = gameReducer(game, { type: 'KEY', key: '#', now: 1200 });
+  for (const [before, input] of [[readyForKey, { type: 'KEY', key: '#' }], [readyForWire, { type: 'WIRE', index: wire }]]) {
+    const winning = gameReducer(before, { ...input, now: before.deadline - 1 });
+    assert.equal(winning.phase, 'won');
+    assert.equal(winning.remaining, 1);
+    for (const now of [before.deadline, before.deadline + 50]) {
+      const lost = gameReducer(before, { ...input, now });
+      assert.equal(lost.phase, 'lost');
+      assert.equal(lost.remaining, 0);
+      assert.equal(gameReducer(lost, { ...input, now: now + 1 }), lost);
+    }
+  }
+});

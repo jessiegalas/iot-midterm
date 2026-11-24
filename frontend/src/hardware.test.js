@@ -4,7 +4,9 @@ import { parseFrame, readLines } from '../server/protocol.js';
 import { gameReducer, initialGame, recordWin } from './game.js';
 
 const playing = '@STATE,20a1b3c4,8,9,playing,2,175,01,1,2,0,24,-----:.----:..---:...--,2:4:6:8:10,,';
-const apply = (game, frame, now = 100) => gameReducer(game, { type: 'HW_SNAPSHOT', snapshot: parseFrame(frame), now });
+const apply = (game, frame, players = null) => gameReducer(game, {
+  type: 'HW_SNAPSHOT', snapshot: { ...parseFrame(frame), players }, now: 100,
+});
 
 test('valid hardware snapshots carry every color and recognize all ten cards', () => {
   assert.deepEqual(parseFrame(playing).cards, [2, 4, 6, 8, 10]);
@@ -25,17 +27,18 @@ test('valid hardware snapshots carry every color and recognize all ten cards', (
 
 test('a resumed winning snapshot records one score under the original board run ID', () => {
   let game = gameReducer(initialGame(), { type: 'HW_ATTACH' });
-  game = gameReducer(game, { type: 'HW_BEGIN', players: { team: 'Team', expert: 'E', defuser: 'D' } });
-  game = apply(game, playing);
+  const players = { team: 'Team', expert: 'E', defuser: 'D' };
+  game = apply(game, playing, players);
   const won = '@STATE,20a1b3c4,8,14,won,3,63,,0,2,1,16,-----:.----:..---:...--,10,,';
-  game = apply(game, won);
+  game = apply(game, won, players);
   const scores = recordWin([], game, 1);
   assert.equal(scores[0].team, 'Team');
   assert.equal(scores[0].remaining, 63000);
   assert.equal(scores[0].attempts, 2);
   assert.equal(apply(game, won), game);
   assert.equal(apply(game, playing), game);
-  const reload = apply(gameReducer(initialGame(), { type: 'HW_ATTACH' }), won);
+  const reload = apply(gameReducer(initialGame(), { type: 'HW_ATTACH' }), won, players);
+  assert.equal(reload.team, 'Team');
   assert.equal(recordWin(scores, reload, 2), scores);
   const restarted = apply(game, '@STATE,70a1b3c4,0,1,idle,1,240,,0,0,0,0,,,,');
   assert.equal(restarted.phase, 'idle');

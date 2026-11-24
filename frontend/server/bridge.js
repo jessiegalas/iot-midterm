@@ -5,6 +5,11 @@ import { isCommand, parseFrame, VERSION } from './protocol.js';
 const token = () => randomBytes(8).toString('hex');
 const result = (code, ok = false) => ({ ok, code });
 const live = state => ['ready', 'playing', 'cleared'].includes(state?.phase);
+const confirmsStart = (command, frame) => command?.start && command.start.boot === frame.boot &&
+  command.start.run === frame.run && frame.phase !== 'idle' && frame.lastCommand === command.id;
+const confirmsReset = (command, frame) => command?.reset && command.reset.boot === frame.boot &&
+  command.reset.run === frame.run && frame.phase === 'idle' && frame.lastCommand === command.id;
+const startResult = (frame, device) => ({ ...result('applied', true), runId: `esp32:${device}:${frame.boot}:${frame.run}` });
 const LINK_TIMEOUT = 3000;
 const HANDOFF_TIMEOUT = 1000;
 const COMMAND_TIMEOUT = 1200;
@@ -14,6 +19,7 @@ export class DeviceBridge extends EventEmitter {
   active = null;
   taking = null;
   state = null;
+  musicClock = null;
   device = null;
   queue = [];
   pending = null;
@@ -22,9 +28,12 @@ export class DeviceBridge extends EventEmitter {
   published = null;
   nextHeartbeat = 0;
 
-  constructor({ now = () => performance.now() } = {}) {
+  constructor({ now = () => performance.now(), recorder, requireStorage = false } = {}) {
     super();
     this.now = now;
+    this.recorder = recorder;
+    this.requireStorage = requireStorage;
+    if (recorder?.view.runStatus === 'active' || recorder?.view.runStatus === 'reconnecting') recorder.connectionLost(this.now());
   }
 
   healthy(link) {
@@ -40,9 +49,14 @@ export class DeviceBridge extends EventEmitter {
       transport: this.active?.kind ?? null,
       connection: this.active?.lease ?? null,
       usbReady: this.healthy(this.links.get('usb')),
-      state: this.state,
+      state: this.recorder?.view.snapshot ?? this.state,
+      musicClock: this.active ? this.musicClock : null,
+      runStatus: this.recorder?.view.runStatus ?? null,
+      scoreStatus: this.recorder?.view.scoreStatus ?? (this.state?.phase === 'won' && !this.recorder ? 'failed' : null),
       notice: this.notice || (oldFirmware ? 'Update the ESP32 firmware to protocol 2.' :
-        wrongDevice ? 'The standby link belongs to a different ESP32.' : ''),
+        wrongDevice ? 'The standby link belongs to a different ESP32.' :
+          this.recorder?.view.runStatus === 'unconfirmed' ? 'The hardware result is unconfirmed. Reconnect to check the board.' :
+            this.recorder?.failed ? 'Hardware state could not be saved yet. The bridge will retry.' : ''),
     };
   }
 
@@ -99,9 +113,15 @@ export class DeviceBridge extends EventEmitter {
       if (this.taking?.link === link && this.taking.lease === frame.lease) this.taking.confirmed = true;
       return;
     }
+    if (frame.type === 'music') {
+      if (frame.boot === link.boot) link.music = { ...frame, sampledAt: Date.now() };
+      return;
+    }
     if (frame.type === 'ack') {
       if (this.active !== link || this.pending?.id !== frame.command || this.active.lease !== frame.lease) return;
       const command = this.pending;
+      if ((command.start || command.reset) && frame.ok) return;
+      if (command.start) this.recorder?.settle(command.id, 'abandoned');
       this.pending = null;
       command.resolve(frame.ok ? result('applied', true) : result('refused'));
       this.pump();
@@ -109,31 +129,55 @@ export class DeviceBridge extends EventEmitter {
     }
 
     if (frame.type !== 'state' || frame.boot !== link.boot) return;
-    if (this.taking?.link === link && this.taking.confirmed) {
+    const reconciled = this.taking?.link === link && this.taking.confirmed;
+    if (reconciled) {
       link.lease = this.taking.lease;
       this.active = link;
       this.device = link.device;
       this.taking = null;
-      if (this.uncertain) {
-        const applied = this.state?.boot === frame.boot && frame.lastCommand === this.uncertain.id;
-        this.uncertain.resolve(applied ? result('applied', true) : result('uncertain'));
-        this.uncertain = null;
-      }
     }
     if (this.active !== link) return;
+    const lastKnown = this.state ?? this.recorder?.view.snapshot;
     if (this.state?.boot !== frame.boot) {
-      if (live(this.state)) this.notice = 'The ESP32 restarted. The previous run could not be recovered.';
+      if (live(lastKnown) && (lastKnown.boot !== frame.boot || (lastKnown.deviceId && lastKnown.deviceId !== link.device))) {
+        this.notice = 'The ESP32 restarted or changed. The previous result is unconfirmed.';
+      }
     } else {
       if (frame.revision < this.state.revision) return;
       if (frame.run !== this.state.run) this.notice = '';
     }
+    const previous = this.state;
     this.state = frame;
+    const music = link.music;
+    const secondsElapsed = 240 - frame.seconds;
+    this.musicClock = frame.phase === 'playing' && music?.boot === frame.boot &&
+      music.run === frame.run && music.revision === frame.revision &&
+      Math.floor(music.elapsed / 1000) === secondsElapsed
+      ? { elapsed: music.elapsed, sampledAt: music.sampledAt } : null;
+    link.music = null;
+    const saved = !this.recorder || this.recorder.observe(link.device, frame, reconciled);
+    if (reconciled && this.uncertain) {
+      const recovering = this.uncertain;
+      const applied = recovering.start ? saved && confirmsStart(recovering, frame) :
+        recovering.reset ? confirmsReset(recovering, frame) : previous?.boot === frame.boot && frame.lastCommand === recovering.id;
+      if (!applied && recovering.start) this.recorder?.settle(recovering.id, 'unconfirmed');
+      recovering.resolve(applied ? (recovering.start ? startResult(frame, link.device) : result('applied', true)) : result('uncertain'));
+      this.uncertain = null;
+    }
+    if ((saved && confirmsStart(this.pending, frame)) || confirmsReset(this.pending, frame)) {
+      const command = this.pending;
+      this.pending = null;
+      command.resolve(command.start ? startResult(frame, link.device) : result('applied', true));
+      this.pump();
+    }
     this.select();
     this.publish();
   }
 
   loseControl() {
     this.active = null;
+    this.musicClock = null;
+    this.recorder?.connectionLost(this.now());
     if (this.pending) {
       this.uncertain = { ...this.pending, deadline: this.now() + LINK_TIMEOUT + HANDOFF_TIMEOUT };
       this.pending = null;
@@ -167,6 +211,7 @@ export class DeviceBridge extends EventEmitter {
       this.publish();
     }
     if (this.uncertain?.deadline <= now) {
+      if (this.uncertain.start) this.recorder?.settle(this.uncertain.id, 'unconfirmed');
       this.uncertain.resolve(result('uncertain'));
       this.uncertain = null;
     }
@@ -174,17 +219,18 @@ export class DeviceBridge extends EventEmitter {
       this.nextHeartbeat = now + 1000;
       for (const link of this.links.values()) this.transmit(link, link.version === VERSION ? 'PING' : 'SYNC');
     }
+    this.recorder?.tick(now);
     this.select();
     this.publish();
   }
 
-  command(value, connection = this.active?.lease) {
+  command(value, connection = this.active?.lease, options = {}) {
     if (!isCommand(value)) return Promise.resolve(result('invalid'));
     if (!this.active) return Promise.resolve(result('offline'));
     if (connection !== this.active.lease) return Promise.resolve(result('dropped'));
     if (this.queue.length >= 16) return Promise.resolve(result('busy'));
     return new Promise(resolve => {
-      this.queue.push({ value, resolve, id: token() });
+      this.queue.push({ value, resolve, id: token(), options });
       this.pump();
     });
   }
@@ -193,6 +239,22 @@ export class DeviceBridge extends EventEmitter {
     if (!this.active || this.pending) return;
     const command = this.queue.shift();
     if (!command) return;
+    if (command.options.confirmStart) {
+      if (!this.state || live(this.state) || this.uncertain?.start) {
+        command.resolve(result('busy'));
+        this.pump();
+        return;
+      }
+      command.start = { boot: this.state.boot, run: (this.state.run + 1) >>> 0 };
+      const failure = this.recorder ? this.recorder.stage(command.id, this.active.device, command.start, command.options) :
+        this.requireStorage ? 'unavailable' : null;
+      if (failure) {
+        command.resolve(result(failure));
+        this.pump();
+        return;
+      }
+    }
+    if (command.options.confirmReset && this.state) command.reset = { boot: this.state.boot, run: this.state.run };
     this.pending = { ...command, deadline: this.now() + COMMAND_TIMEOUT };
     this.transmit(this.active, `CMD,${this.active.lease},${command.id},${command.value}`);
   }

@@ -23,6 +23,12 @@ export function parseFrame(line) {
       return values.length === 3 && hex(lease, 16) && hex(command, 16) && ['OK', 'REFUSED'].includes(status)
         ? { type: 'ack', lease, command, ok: status === 'OK' } : null;
     }
+    case '@MUSIC': {
+      const [boot, run, revision, elapsed] = values;
+      if (values.length !== 4 || !hex(boot, 8) || !integer(run, 0, 0xffffffff) ||
+        !integer(revision, 0, 0xffffffff) || !integer(elapsed, 0, 239999)) return null;
+      return { type: 'music', boot, run: Number(run), revision: Number(revision), elapsed: Number(elapsed) };
+    }
     case '@STATE': {
       if (values.length !== 15) return null;
       const [boot, run, revision, phase, level, seconds, entry, wrong, attempts, solved, mask, clueText, cardText, loss, lastCommand] = values;

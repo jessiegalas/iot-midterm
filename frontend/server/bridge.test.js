@@ -104,3 +104,22 @@ test('USB takes over even when the last Wi-Fi command never reached the board', 
   assert.equal(bridge.view().state.entry, '4');
   assert.equal(usb.lines.some(line => line.startsWith('CMD,')), false);
 });
+
+test('the music clock follows the matching playing snapshot on the active transport', () => {
+  const { bridge, wifi, usb, take } = fixture();
+  wifi.line('@MUSIC,abcd1234,1,1,40125');
+  take(wifi, state(1));
+  assert.equal(bridge.view().musicClock.elapsed, 40125);
+  usb.line('@MUSIC,abcd1234,1,2,40250');
+  assert.equal(bridge.view().musicClock.elapsed, 40125);
+  wifi.close();
+  assert.equal(bridge.view().musicClock, null);
+  take(usb, state(2));
+  assert.equal(bridge.view().musicClock.elapsed, 40250);
+  usb.line('@MUSIC,abcd1234,1,3,41000');
+  usb.line(state(3));
+  assert.equal(bridge.view().musicClock, null);
+  usb.line('@MUSIC,abcd1234,1,4,40000');
+  usb.line(state(4, '', 'ready'));
+  assert.equal(bridge.view().musicClock, null);
+});

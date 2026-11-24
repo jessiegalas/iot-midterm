@@ -5,6 +5,7 @@
 #include <Adafruit_SSD1306.h>
 #include "BridgeTransport.h"
 #include "WireDebounce.h"
+#include "SoundtrackBeat.h"
 
 // ---------------- OLED ----------------
 #define SCREEN_WIDTH 128
@@ -123,15 +124,16 @@ int assignedCards[NUM_WIRES];      // riddle card numbers shown to the player fo
 int requiredCount = 0;
 int wiresPulledCorrect = 0;
 
-unsigned long totalGameSeconds = 240; // 4 minute overall timer - change to taste
+const unsigned long totalGameSeconds = 240; // Shared with the console's countdown and soundtrack timing.
 long timeLeft = 240;
 unsigned long lastTickMillis = 0;
 byte lastReadyMask = 255;   // which wires were missing when the ready screen was last drawn
 
-// Beeps faster and faster as time runs out, then goes to a
-// continuous alarm tone for the final few seconds.
-unsigned long lastWarnBeepMillis = 0;
-const int PANIC_SECONDS   = 3;    // switch to a continuous tone at this point
+// Carry the active fraction of a second across pauses so the beat keeps its phase.
+unsigned long pausedTickMillis = 0;
+uint32_t lastMusicStep = UINT32_MAX;
+unsigned long feedbackToneAt = 0;
+unsigned feedbackToneDuration = 0;
 
 const int MAX_STRIKES = 3;
 uint32_t revision = 0;
@@ -157,6 +159,8 @@ void handleKeypad(char key);
 void handleWires();
 void handleTimer();
 void updateWarningBeep();
+unsigned long musicElapsedMillis();
+void playFeedbackTone(unsigned frequency, unsigned duration);
 void updatePlayingScreen();
 void checkLevelComplete();
 void flashMessage(const char* msg);
@@ -190,6 +194,12 @@ void sendState(BridgeTransport::Source source) {
     }
   }
   char frame[BridgeTransport::FRAME_SIZE];
+  // Optional protocol 2 timing frame. Older bridges still receive the regular snapshot.
+  if (state == GAME_PLAYING) {
+    snprintf(frame, sizeof(frame), "@MUSIC,%s,%lu,%lu,%lu", bootId,
+             static_cast<unsigned long>(runId), static_cast<unsigned long>(revision), musicElapsedMillis());
+    BridgeTransport::send(source, frame);
+  }
   snprintf(frame, sizeof(frame), "@STATE,%s,%lu,%lu,%s,%d,%ld,%s,%d,%d,%d,%u,%s,%s,%s,%s",
            bootId, static_cast<unsigned long>(runId), static_cast<unsigned long>(revision), phases[state],
            level, timeLeft, state == GAME_IDLE || state == GAME_READY ? "" : codeBuffer,
@@ -288,6 +298,7 @@ void resetToIdle() {
   state = GAME_IDLE;
   level = 1;
   timeLeft = totalGameSeconds;
+  pausedTickMillis = 0;
   totalWrongTries = 0;
   noTone(BUZZER_PIN);
   digitalWrite(LED_RED, LOW);
@@ -393,7 +404,8 @@ void startGame() {
   level = 1;
   timeLeft = totalGameSeconds;
   lastTickMillis = millis();
-  lastWarnBeepMillis = 0;
+  pausedTickMillis = 0;
+  lastMusicStep = UINT32_MAX;
   noTone(BUZZER_PIN);
   digitalWrite(LED_RED, LOW);
   digitalWrite(LED_GREEN, LOW);
@@ -401,7 +413,7 @@ void startGame() {
 }
 
 void generateLevel() {
-  tone(BUZZER_PIN, 1500, 200);  // round-start beep
+  playFeedbackTone(1500, 200);
   // 1) random 4-digit code
   for (int i = 0; i < 4; i++) secretCode[i] = random(0, 10);
   codeBufLen = 0;
@@ -451,7 +463,7 @@ void handleKeypad(char k) {
       codeBuffer[codeBufLen++] = k;
       codeBuffer[codeBufLen] = '\0';
     }
-    tone(BUZZER_PIN, 1200, 40);
+    playFeedbackTone(1200, 40);
     changed = true;
   } else if (k == '#') {
     if (codeBufLen == 4) {
@@ -461,13 +473,13 @@ void handleKeypad(char k) {
       }
       if (match) {
         codeSolved = true;
-        tone(BUZZER_PIN, 2000, 150);
+        playFeedbackTone(2000, 150);
         changed = true;
       } else {
         wrongCodeTries++;
         totalWrongTries++;
         changed = true;
-        tone(BUZZER_PIN, 300, 300);
+        playFeedbackTone(300, 300);
         if (wrongCodeTries >= MAX_STRIKES) {
           explode("WRONG CODE 3X", "CODE");
           return;
@@ -496,7 +508,7 @@ void handleWires() {
       }
       if (isRequired) {
         wiresPulledCorrect++;
-        tone(BUZZER_PIN, 1800, 100);
+        playFeedbackTone(1800, 100);
       } else {
         explode("WRONG WIRE PULLED", "WIRE");
         return;
@@ -514,7 +526,7 @@ void checkLevelComplete() {
       winGame();
     } else {
       noTone(BUZZER_PIN);
-      lastWarnBeepMillis = 0;
+      pausedTickMillis = min(millis() - lastTickMillis, 999UL);
       state = GAME_LEVEL_CLEARED;
       feedbackStarted = millis();
       flashMessage("LEVEL CLEAR!");
@@ -535,21 +547,22 @@ void handleTimer() {
   updateWarningBeep();
 }
 
+unsigned long musicElapsedMillis() {
+  return (totalGameSeconds - timeLeft) * 1000 + min(millis() - lastTickMillis, 999UL);
+}
+
+void playFeedbackTone(unsigned frequency, unsigned duration) {
+  feedbackToneAt = millis();
+  feedbackToneDuration = duration;
+  tone(BUZZER_PIN, frequency, duration);
+}
+
 void updateWarningBeep() {
-  if (timeLeft <= 0) return;
-
-  if (timeLeft <= PANIC_SECONDS) {
-    tone(BUZZER_PIN, 1200);  // continuous - no duration means it doesn't stop on its own
-    return;
-  }
-
-  // beeps for the ENTIRE round, starting slow (~900ms) and accelerating
-  // smoothly down to fast (~100ms) as timeLeft approaches zero
-  int interval = map(timeLeft, 0, totalGameSeconds, 100, 900);
-  interval = constrain(interval, 100, 900);
-  if (millis() - lastWarnBeepMillis >= (unsigned long)interval) {
-    lastWarnBeepMillis = millis();
-    tone(BUZZER_PIN, 1000, interval / 2);
+  const auto beat = SoundtrackBeat::at(musicElapsedMillis());
+  if (beat.step == lastMusicStep) return;
+  lastMusicStep = beat.step;
+  if (beat.beep && millis() - feedbackToneAt >= feedbackToneDuration) {
+    tone(BUZZER_PIN, beat.downbeat ? 1200 : 1000, 45);
   }
 }
 
@@ -695,8 +708,7 @@ void beginLevel() {
   for (int i = 0; i < NUM_WIRES; i++) {
     if (wireBaseline[i] == HIGH) { enterReady(); return; }   // a wire wasn't really seated, so ask again
   }
-  lastTickMillis = millis();   // the clock only runs while a level is actually being played
-  lastWarnBeepMillis = 0;
+  lastTickMillis = millis() - pausedTickMillis;
   state = GAME_PLAYING;
   changed = true;
 }

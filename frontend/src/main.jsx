@@ -1,8 +1,11 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { CircleHelp, CircuitBoard, Crosshair, Play, Radio, ShieldCheck, Volume2, VolumeX, X } from 'lucide-react';
-import { MORSE, COLORS, DURATION, STORAGE_KEY, initialGame, gameReducer, clock, loadScores, rankScores, makeId, recordWin } from './game';
-import { LOCKS, RIDDLE_CARDS } from './expert-manual';
+import { MORSE, COLORS, DURATION, initialGame, gameReducer, clock, makeId } from './game';
+import { Manual } from './manual';
+import { saveMessages, useServerScores } from './scores';
+import { LegacyScores } from './legacy-scores';
+import { useSoundtrack } from './use-soundtrack';
 import { JoinPlayer, PlayerLobby } from './player-lobby';
 import '@fontsource/dm-sans/latin-400.css';
 import '@fontsource/dm-sans/latin-500.css';
@@ -20,33 +23,47 @@ const pages = [
 ];
 
 const offlineLink = { status: 'offline', transport: null, connection: null, usbReady: false, notice: '', state: null };
+const DEVICE_MODE = 'defuse.hardware-mode';
+function restoreDeviceMode() {
+  try { return sessionStorage.getItem(DEVICE_MODE) === '1'; } catch { return false; }
+}
+function rememberDeviceMode(value) {
+  try { sessionStorage.setItem(DEVICE_MODE, value ? '1' : '0'); } catch { /* This tab can still change modes. */ }
+}
 const commandMessages = {
   dropped: 'The link changed before that input was sent. Please check the board and try again.',
   uncertain: 'The link changed before confirming that input. Check the device state before trying again.',
   offline: 'The game is continuing on the ESP32. Wait for the link or use the physical controls.',
   busy: 'Too many inputs are waiting. Try again in a moment.',
+  unavailable: 'The hardware start could not be saved. Check the score database before retrying.',
 };
 
 function App() {
-  const [tab, setTab] = useState('leaderboard');
-  const [game, dispatch] = useReducer(gameReducer, undefined, initialGame);
-  const [scores, setScores] = useState(() => loadScores(localStorage));
+  const [tab, setTab] = useState(() => restoreDeviceMode() ? 'console' : 'leaderboard');
+  const [game, dispatch] = useReducer(gameReducer, undefined, () => ({ ...initialGame(), device: restoreDeviceMode() }));
+  const { scores, loading: scoresLoading, storageError, states: scoreStates } = useServerScores(game);
   const [modal, setModal] = useState(null);
-  const [sound, setSound] = useState(false);
-  const [storageError, setStorageError] = useState(false);
   const [link, setLink] = useState(offlineLink);
   const [commandError, setCommandError] = useState('');
+  const [leavingFailure, setLeavingFailure] = useState(false);
   const connectionEpoch = useRef(0);
   const sendQueue = useRef(Promise.resolve());
   const device = game.device;
   const controlsBlocked = device && link.status !== 'connected';
-  const audio = useRef(null);
-  const prevSecond = useRef(null);
   const playing = game.phase === 'playing';
   const failed = game.phase === 'lost';
   const result = game.phase === 'won' || game.phase === 'lost';
   const active = playing || game.phase === 'ready' || game.phase === 'cleared';
-  const ranked = tab === 'leaderboard' ? rankScores(scores) : [];
+  const ranked = tab === 'leaderboard' ? scores : [];
+  const soundtrack = useSoundtrack({
+    active: playing && (!device || (link.status === 'connected' && link.state?.phase === 'playing')),
+    runId: game.id,
+    device,
+    deadline: game.deadline,
+    hardwareSeconds: link.state?.seconds,
+    clock: link.musicClock,
+    snapshotAt: link.receivedAt,
+  });
 
   useEffect(() => {
     if (failed) {
@@ -61,7 +78,6 @@ function App() {
     return () => clearInterval(timer);
   }, [playing, controlsBlocked]);
   useEffect(() => {
-    if (import.meta.env.DEV) return;
     const events = new EventSource('/api/events');
     let previousLink;
     const update = view => {
@@ -70,7 +86,7 @@ function App() {
         ++connectionEpoch.current;
         previousLink = currentLink;
       }
-      setLink(view);
+      setLink({ ...view, receivedAt: Date.now() });
     };
     events.onmessage = event => update(JSON.parse(event.data));
     events.onerror = () => update(offlineLink);
@@ -78,44 +94,25 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (device && link.status === 'connected' && link.state) {
+    if (device && link.state) {
       dispatch({ type: 'HW_SNAPSHOT', snapshot: link.state, now: performance.now() });
     }
-  }, [device, link.status, link.state]);
+  }, [device, link.state]);
 
-  useEffect(() => {
-    if (game.phase !== 'won') return;
-    setScores(rows => {
-      const next = recordWin(rows, game, Date.now());
-      if (next === rows) return rows;
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { setStorageError(true); }
-      return next;
-    });
-  }, [game.phase, game.id, game.team, game.defuser, game.expert, game.remaining, game.attempts]);
-  useEffect(() => {
-    const second = Math.ceil(game.remaining / 1000);
-    if (playing && sound && second !== prevSecond.current && audio.current) {
-      const ctx = audio.current; const osc = ctx.createOscillator(); const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination); osc.frequency.value = second <= 30 ? 880 : 440;
-      gain.gain.setValueAtTime(0.025, ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
-      osc.start(); osc.stop(ctx.currentTime + 0.09);
-    }
-    prevSecond.current = second;
-  }, [game.remaining, sound, playing]);
-  function toggleSound() { if (!sound) { const Audio = window.AudioContext || window.webkitAudioContext; if (Audio) { audio.current ||= new Audio(); audio.current.resume(); } } setSound(!sound); }
-  async function sendCmd(command) {
+  async function sendCmd(command, { players, immediate = false } = {}) {
     const epoch = connectionEpoch.current;
     const connection = link.connection;
-    const task = sendQueue.current.then(async () => {
+    const send = async () => {
       if (!connection) return { code: 'offline' };
       if (epoch !== connectionEpoch.current) return { code: 'dropped' };
       const response = await fetch('/api/commands', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, connection }), signal: AbortSignal.timeout(6500),
+        body: JSON.stringify({ command, connection, players }), signal: AbortSignal.timeout(6500),
       });
       return response.json();
-    }).catch(() => ({ code: 'uncertain' }));
-    sendQueue.current = task;
+    };
+    const task = (immediate ? send() : sendQueue.current.then(send)).catch(() => ({ code: 'uncertain' }));
+    if (!immediate) sendQueue.current = task;
     const outcome = await task;
     setCommandError(outcome.ok ? '' : (commandMessages[outcome.code] ?? 'The ESP32 refused that command.'));
     return Boolean(outcome.ok);
@@ -123,9 +120,10 @@ function App() {
   function press(key) {
     if (game.round?.solved || controlsBlocked) return;
     if (device) sendCmd('KEY,' + key);
-    else dispatch({ type: 'KEY', key });
+    else dispatch({ type: 'KEY', key, now: performance.now() });
   }
   function toggleDevice() {
+    rememberDeviceMode(!device);
     if (device) dispatch({ type: 'HW_DETACH' });
     else dispatch({ type: 'HW_ATTACH' });
     setCommandError('');
@@ -138,17 +136,28 @@ function App() {
     }
     setModal('lobby');
   }
-  async function start(players) {
-    const names = { ...players, team: players.defuser + ' + ' + players.expert };
-    if (device) {
-      dispatch({ type: 'HW_BEGIN', players: names });
-      if (!await sendCmd('START')) {
-        dispatch({ type: 'HW_START_FAILED' });
+  async function start(players, lobbyId) {
+    let outcome;
+    if (lobbyId) {
+      try {
+        const response = await fetch('/api/lobbies/' + lobbyId + '/start', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: device ? 'hardware' : 'simulation', connection: link.connection }),
+          signal: AbortSignal.timeout(8000),
+        });
+        outcome = await response.json();
+      } catch {
+        outcome = { code: 'uncertain' };
+      }
+      if (!outcome.ok) {
+        setCommandError(commandMessages[outcome.code] ?? 'The lobby could not start. Check both names and try again.');
         return;
       }
-    } else {
-      dispatch({ type: 'START', players: names, now: performance.now(), id: makeId() });
-    }
+    } else if (device && !await sendCmd('START', { players })) return;
+    const names = outcome?.players ?? players;
+    if (!device) dispatch({ type: 'START', players: { ...names, team: names.defuser + ' + ' + names.expert },
+      now: performance.now(), id: outcome?.runId ?? makeId() });
+    setCommandError('');
     setTab('console');
     setModal(null);
   }
@@ -170,8 +179,15 @@ function App() {
     }
   }
   async function returnAfterFailure() {
-    if (device && !await sendCmd('RESET')) return;
+    if (leavingFailure) return;
+    setLeavingFailure(true);
+    if (device && (controlsBlocked || !await sendCmd('RESET', { immediate: true }))) {
+      rememberDeviceMode(false);
+      dispatch({ type: 'HW_DETACH' });
+      setCommandError('');
+    }
     if (!device) dispatch({ type: 'RESET' });
+    setLeavingFailure(false);
     setModal(null);
     openTab('leaderboard');
   }
@@ -186,8 +202,8 @@ function App() {
   const connection = link.status === 'connected'
     ? (link.transport === 'wifi' ? 'Wi-Fi connected' : 'USB connected')
     : link.status === 'switching' ? 'Switching connection' : 'ESP32 offline';
-  const error = commandError || link.notice || (controlsBlocked
-    ? (link.status === 'switching' ? 'Switching the device link.' : 'Device link lost. The game continues on the ESP32.')
+  const error = commandError || soundtrack.error || link.notice || (controlsBlocked
+    ? (link.status === 'switching' ? 'Switching the device link.' : active ? 'Device link lost. The game continues on the ESP32.' : 'ESP32 link unavailable.')
     : '');
   function openTab(id) {
     setTab(id);
@@ -211,9 +227,7 @@ function App() {
             <button className="icon-button" onClick={() => setModal('help')} aria-label="How to play" title="How to play">
               <CircleHelp size={20} aria-hidden="true" />
             </button>
-            <button className="icon-button" onClick={toggleSound} aria-label={sound ? 'Mute sound' : 'Enable sound'} title={sound ? 'Mute sound' : 'Enable sound'}>
-              {sound ? <Volume2 size={20} aria-hidden="true" /> : <VolumeX size={20} aria-hidden="true" />}
-            </button>
+            <SoundToggle soundtrack={soundtrack} />
           </div>
         </div>
       </header>}
@@ -243,15 +257,15 @@ function App() {
               <CodeModule round={game.phase === 'ready' ? null : game.round}
                 disabled={!playing || controlsBlocked || !!game.round?.solved} onPress={press} />
               {playing || failed ? (
-                <LiveCountdown remaining={game.remaining} message={game.message} failed={failed} />
+                <LiveCountdown remaining={game.remaining} message={game.message} failed={failed} soundtrack={soundtrack} />
               ) : (
-                <MissionSummary game={game} controlsBlocked={controlsBlocked} storageError={storageError}
+                <MissionSummary game={game} controlsBlocked={controlsBlocked} saveState={device ? link.scoreStatus ?? 'pending' : scoreStates[game.id]}
                   onAction={missionAction} onAbort={() => setModal('reset')} onRanking={() => openTab('leaderboard')} />
               )}
               <WireModule round={game.round} device={device} phase={game.phase} level={game.level}
                 controlsBlocked={controlsBlocked} onRestart={missionAction} onManual={() => openTab('manual')}
                 onClues={() => setModal('confirm-clues')} onWire={index => {
-                  dispatch({ type: game.phase === 'ready' ? 'RECONNECT' : 'WIRE', index });
+                  dispatch({ type: game.phase === 'ready' ? 'RECONNECT' : 'WIRE', index, now: performance.now() });
                 }} />
             </div>
             {!playing && !failed && <SessionDetails game={game} />}
@@ -260,7 +274,7 @@ function App() {
         {tab === 'manual' && <Manual />}
         {tab === 'leaderboard' && (
           <Leaderboard ranked={ranked} currentId={game.id}
-            storageError={storageError} active={active} onPlay={() => setModal('lobby')} />
+            storageError={storageError} loading={scoresLoading} active={active} onPlay={() => setModal('lobby')} />
         )}
       </main>
 
@@ -270,11 +284,13 @@ function App() {
           {modal === 'failure' && (
             <>
               <p>{game.message}</p>
-              {controlsBlocked && <p>Reconnect the ESP32 before returning to the leaderboard.</p>}
+              {controlsBlocked && <p>The console will detach from the offline ESP32 when you leave.</p>}
               {commandError && <p role="status">{commandError}</p>}
               <div className="dialog-actions">
                 <button className="button button-quiet" onClick={() => setModal(null)}>Review result</button>
-                <button className="button button-primary" onClick={returnAfterFailure} disabled={controlsBlocked}>Return to leaderboard</button>
+                <button className="button button-primary" onClick={returnAfterFailure} disabled={leavingFailure}>
+                  {leavingFailure ? 'Resetting the ESP32…' : 'Return to leaderboard'}
+                </button>
               </div>
             </>
           )}
@@ -317,7 +333,7 @@ function App() {
   );
 }
 
-function MissionSummary({ game, controlsBlocked, storageError, onAction, onAbort, onRanking }) {
+function MissionSummary({ game, controlsBlocked, saveState, onAction, onAbort, onRanking }) {
   const { phase, level, remaining, round, device } = game;
   const wrong = phase === 'ready' ? 0 : round?.wrong || 0;
   const displayLevel = phase === 'ready' ? level + 1 : level;
@@ -330,7 +346,7 @@ function MissionSummary({ game, controlsBlocked, storageError, onAction, onAbort
     won: 'Mission complete', lost: 'Mission failed',
   }[phase];
   const message = phase === 'won'
-    ? `${game.attempts} incorrect codes. ${storageError ? 'Score kept for this session.' : 'Score saved to the leaderboard.'}`
+    ? `${game.attempts} incorrect codes. ${saveMessages[saveState ?? 'saving']}`
     : game.message || (phase === 'idle' ? 'Decode the clues with your Expert and clear three levels on one clock.' : '');
   const disabled = controlsBlocked || phase === 'cleared' || (phase === 'ready' && round.pulled.some(Boolean));
 
@@ -356,13 +372,22 @@ function MissionSummary({ game, controlsBlocked, storageError, onAction, onAbort
   );
 }
 
-function LiveCountdown({ remaining, message, failed }) {
+function SoundToggle({ soundtrack }) {
+  const label = soundtrack.enabled ? 'Mute sound' : 'Enable sound';
+  return (
+    <button type="button" className="icon-button" aria-label={label} title={label} onClick={soundtrack.toggle}>
+      {soundtrack.enabled ? <Volume2 size={20} aria-hidden="true" /> : <VolumeX size={20} aria-hidden="true" />}
+    </button>
+  );
+}
+
+function LiveCountdown({ remaining, message, failed, soundtrack }) {
   const urgent = failed || remaining < 31000;
   return (
     <section className="live-countdown" aria-label="Mission countdown" data-urgent={urgent || undefined}>
       <div className="live-countdown-header">
         <p className="run-state" aria-live="polite"><span className="status-dot" aria-hidden="true" />{failed ? 'Mission failed' : urgent ? 'Time running low' : 'Device armed'}</p>
-        <span className="timer-system" aria-hidden="true">SYS / 001</span>
+        <SoundToggle soundtrack={soundtrack} />
       </div>
       <div className="countdown-ring" style={{ '--remaining': timePercentage(remaining) }}>
         <ClockReadout remaining={remaining} showFractions />
@@ -521,64 +546,18 @@ function SessionDetails({ game }) {
   );
 }
 
-function Manual() {
-  return (
-    <div className="manual">
-      <section className="reference" aria-labelledby="roles-title">
-        <h2 id="roles-title">How to play</h2>
-        <p>The Defuser operates the device and reads out the Morse groups and wire clue numbers. The Expert uses this manual and tells the Defuser which digits to enter and which wires to pull. Keep each player’s screen private.</p>
-      </section>
-      <section className="reference" aria-labelledby="morse-title">
-        <h2 id="morse-title">Morse decoder</h2>
-        <p>Match each five-symbol group to one digit. Keep leading zeros.</p>
-        <dl className="morse-reference">
-          {MORSE.map((morse, digit) => <div key={digit}><dt>{digit}</dt><dd><code aria-label={morse.split('').map(mark => mark === '.' ? 'dot' : 'dash').join(' ')}>{morse}</code></dd></div>)}
-        </dl>
-      </section>
-      <section className="reference" aria-labelledby="codebook-title">
-        <h2 id="codebook-title">Codebook</h2>
-        <p>Use A = 0 through Z = 25 for the letter locks.</p>
-        <dl className="morse-reference alphabet-reference">
-          {Array.from('ABCDEFGHIJKLMNOPQRSTUVWXYZ', (letter, index) => <div key={letter}><dt>{letter}</dt><dd>{index}</dd></div>)}
-        </dl>
-        <ul className="help-steps lock-rules">{LOCKS.map(lock => <li key={lock}>{lock}</li>)}</ul>
-      </section>
-      <section className="reference" aria-labelledby="riddles-title">
-        <h2 id="riddles-title">Wire riddles</h2>
-        <p>Find the card number and tell the Defuser which wire to pull. The order does not matter.</p>
-        <div className="riddle-grid">
-          {RIDDLE_CARDS.map(card => (
-            <details key={card.id}>
-              <summary>Card {String(card.id).padStart(2, '0')}</summary>
-              {card.lines.map((line, index) => <p key={index}>{/^[A-Z]{3,}( [A-Z]{1,})+$/.test(line) ? <code>{line}</code> : line}</p>)}
-            </details>
-          ))}
-        </div>
-      </section>
-      <details className="session-details">
-        <summary>Rules by mode</summary>
-        <ul className="help-steps">
-          <li>Both modes have five wires. Simulation requires one, two, then three correct wires. ESP32 levels require one to five.</li>
-          <li>Three wrong codes in one level, a wrong wire, or an expired timer ends the mission. Incomplete codes do not use a strike.</li>
-          <li>Reconnect wires between levels. The four-minute timer pauses until the next level begins.</li>
-        </ul>
-      </details>
-    </div>
-  );
-}
-
-function Leaderboard({ ranked, currentId, storageError, active, onPlay }) {
+function Leaderboard({ ranked, currentId, storageError, loading, active, onPlay }) {
   return (
     <section className="leaderboard" aria-label="Saved scores">
       <div className="leaderboard-heading">
         <p>Most time remaining ranks first. Fewer incorrect codes break ties.</p>
         {!active && <button className="button button-primary" onClick={onPlay}>Connect Players</button>}
       </div>
-      {storageError && <p className="notice" role="status">Browser storage is unavailable. This session’s results will disappear after reload.</p>}
+      {storageError && <p className="notice" role="status">The score database could not be reached. Showing the last available scores.</p>}
       <div className="rankings-layout">
         <section className="podium-panel" aria-labelledby="podium-title">
           <h2 id="podium-title">Top finishers</h2>
-          {ranked.length === 0 && <p className="rankings-note" role="status">Clear all three levels to earn a podium spot.</p>}
+          {ranked.length === 0 && !storageError && <p className="rankings-note" role="status">{loading ? 'Loading scores…' : 'Clear all three levels to earn a podium spot.'}</p>}
           <ol className="podium" aria-label="Top three ranks" role="list">
             {[ShieldCheck, CircuitBoard, Radio].map((Icon, index) => {
               const score = ranked[index];
@@ -621,7 +600,8 @@ function Leaderboard({ ranked, currentId, storageError, active, onPlay }) {
           ) : <p className="rankings-note">Ranks 4 and below appear here.</p>}
         </section>
       </div>
-      <p className="local-note">Scores are saved in this browser.</p>
+      <p className="local-note">Scores are saved on the host laptop.</p>
+      <LegacyScores />
     </section>
   );
 }

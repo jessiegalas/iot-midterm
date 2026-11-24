@@ -212,10 +212,9 @@ code, kbd, output { font-family: var(--mono); }
 .live-countdown::after { inset: 8px; border: 1px solid #f8a16a18; border-radius: 3px; }
 .live-countdown[data-urgent] { --timer-color: #ff8f84; border-color: #ab5854; }
 .live-countdown-header { position: relative; display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
-.live-countdown .run-state, .timer-system, .live-countdown .mission-clock > span:first-child {
+.live-countdown .run-state, .live-countdown .mission-clock > span:first-child {
   font: 500 .75rem / 1.4 var(--mono); text-transform: uppercase; letter-spacing: .065em;
 }
-.timer-system { color: #b1a18c; }
 .live-countdown .mission-clock {
   position: relative;
   justify-items: center;

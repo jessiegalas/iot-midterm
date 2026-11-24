@@ -1,12 +1,28 @@
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 
-const MIME = { html: 'text/html', js: 'text/javascript', css: 'text/css', woff2: 'font/woff2', woff: 'font/woff' };
+const MIME = { html: 'text/html', js: 'text/javascript', css: 'text/css', woff2: 'font/woff2', woff: 'font/woff', ogg: 'audio/ogg' };
 
-export function securityHeaders(res) {
+function securityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+}
+
+export function createHttpService(handle) {
+  return createServer({ requestTimeout: 10000, headersTimeout: 10000 }, (req, res) => {
+    securityHeaders(res);
+    Promise.resolve().then(() => handle(req, res)).catch(() => {
+      if (res.destroyed || res.writableEnded) return;
+      if (res.headersSent) res.destroy();
+      else replyJson(res, 500, { code: 'unavailable' });
+    });
+  });
+}
+
+export function allowedOrigin(req, origin) {
+  return req.headers.origin === origin || (req.method === 'GET' && req.headers.origin === undefined);
 }
 
 export function replyJson(res, status, body) {
@@ -15,22 +31,25 @@ export function replyJson(res, status, body) {
 }
 
 export async function readJson(req, res, limit = 256) {
-  if (req.headers['content-type'] !== 'application/json') {
+  if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '')) {
     replyJson(res, 415, { code: 'invalid' });
     return null;
   }
+  const oversized = () => {
+    res.setHeader('Connection', 'close');
+    replyJson(res, 413, { code: 'invalid' });
+    return null;
+  };
+  if (Number(req.headers['content-length']) > limit) return oversized();
   try {
-    req.setEncoding('utf8');
-    let body = '';
+    const chunks = [];
+    let bytes = 0;
     for await (const chunk of req.iterator({ destroyOnReturn: false })) {
-      body += chunk;
-      if (body.length > limit) {
-        res.setHeader('Connection', 'close');
-        replyJson(res, 413, { code: 'invalid' });
-        return null;
-      }
+      bytes += chunk.length;
+      if (bytes > limit) return oversized();
+      chunks.push(chunk);
     }
-    const value = JSON.parse(body);
+    const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, bytes)));
     if (value && typeof value === 'object' && !Array.isArray(value)) return value;
   } catch {
     // Invalid JSON and interrupted request bodies share the same response.
@@ -52,7 +71,7 @@ export function beginEvents(res, subscribe) {
 
 export async function serveFrontend(req, res, dist, indexPath) {
   const file = indexPath ? 'index.html' : req.url?.slice(1);
-  if (req.method !== 'GET' || !/^(?:index\.html|assets\/[\w-]+\.(?:js|css|woff2?))$/.test(file)) {
+  if (req.method !== 'GET' || !/^(?:index\.html|assets\/[\w-]+\.(?:js|css|woff2?|ogg))$/.test(file)) {
     return replyJson(res, 404, { code: 'not-found' });
   }
   try {

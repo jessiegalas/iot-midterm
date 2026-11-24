@@ -9,6 +9,7 @@ import { consoleServer } from './http.js';
 import { playerJoinServer } from './lobby-http.js';
 import { PlayerLobbies } from './lobbies.js';
 import { readLines } from './protocol.js';
+import { ScoreStore } from './storage.js';
 import { tlsOptions, wifiServer } from './wifi.js';
 
 async function listen(t, server) {
@@ -130,10 +131,26 @@ test('phone joins update the host lobby and cannot reach host controls', async t
   });
   assert.equal((await fetch(localPhone + '/api/commands')).status, 404);
   assert.equal((await fetch(localPhone + '/api/lobbies')).status, 404);
-  const role = await (await fetch(localPhone + '/api/join/' + defuser)).json();
-  assert.deepEqual(role, { role: 'defuser', occupied: false });
+  assert.equal((await fetch(localPhone + '/api/scores')).status, 404);
+  assert.equal((await fetch(localPhone + '/api/scores/import', { method: 'POST' })).status, 404);
+  assert.equal((await fetch(localPhone + '/@vite/client')).status, 404);
+  assert.equal((await fetch(localPhone + '/api/join/' + 'f'.repeat(36))).status, 410);
+  const invitation = await fetch(localPhone + '/api/join/' + defuser);
+  const setCookie = invitation.headers.get('set-cookie');
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /SameSite=Strict/);
+  const cookie = setCookie.split(';')[0];
+  const role = await invitation.json();
+  assert.deepEqual(role, { role: 'defuser', occupied: false, status: 'waiting' });
   assert.equal((await join(defuser, 'Rae', 'http://untrusted.invalid')).status, 403);
-  assert.equal((await join(defuser, '  Rae  ')).status, 200);
+  const response = await fetch(localPhone + '/api/join/' + defuser, {
+    method: 'POST', headers: { Origin: localPhone, Cookie: cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '  Rae  ' }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).receipt, undefined);
+  assert.equal((await (await fetch(localPhone + '/api/join/' + defuser, { headers: { Cookie: cookie } })).json()).name, 'Rae');
+  assert.equal((await (await fetch(localPhone + '/api/join/' + defuser)).json()).name, undefined);
   assert.deepEqual((await next()).players, { defuser: 'Rae', expert: null });
   assert.equal((await join(defuser, 'Other')).status, 409);
   assert.equal((await join(expert, '   ')).status, 400);
@@ -149,6 +166,36 @@ test('phone joins update the host lobby and cannot reach host controls', async t
   assert.equal((await join(expert, 'Sam')).status, 410);
 });
 
+test('score writes require the console origin, enforce byte limits, and suppress database details', async t => {
+  const scores = new ScoreStore(':memory:');
+  t.after(() => scores.close());
+  const port = await listen(t, consoleServer(new DeviceBridge(), { scores }));
+  if (port === null) return;
+  const origin = 'http://127.0.0.1:' + port;
+  const route = origin + '/api/scores';
+  const score = { id: 'run1', defuser: 'Ike', expert: 'Mia', remaining: 30000, attempts: 0, date: 100 };
+  const send = (body, headers = {}) => fetch(route, { method: 'POST',
+    headers: { Origin: origin, 'Content-Type': 'application/json; charset=utf-8', ...headers }, body: JSON.stringify(body) });
+  assert.equal((await send(score, { Origin: 'null' })).status, 403);
+  const wrongHost = await new Promise((resolve, reject) => {
+    const req = request(route, { headers: { Host: 'example.invalid:' + port } }, resolve);
+    req.on('error', reject);
+    req.end();
+  });
+  assert.equal(wrongHost.statusCode, 403);
+  wrongHost.resume();
+  assert.equal((await send({ ...score, extra: 'é'.repeat(1100) })).status, 413);
+  assert.equal((await send({ ...score, id: 'esp32:123456abcdef:12345678:1' })).status, 400);
+  assert.equal((await send(score)).status, 201);
+  assert.equal((await send(score)).status, 200);
+  assert.equal((await send({ ...score, attempts: 2 })).status, 409);
+  assert.equal((await (await fetch(route)).json()).scores.length, 1);
+  scores.saveSimulation = () => { throw new Error('private database contents'); };
+  const unavailable = await send({ ...score, id: 'run2' });
+  assert.equal(unavailable.status, 503);
+  assert.deepEqual(await unavailable.json(), { code: 'storage-unavailable' });
+});
+
 test('expired invites cannot be used to take a slot', () => {
   let now = 0;
   const lobbies = new PlayerLobbies({ now: () => now });
@@ -157,4 +204,40 @@ test('expired invites cannot be used to take a slot', () => {
   now += 30 * 60 * 1000;
   assert.equal(lobbies.describe(invite), null);
   assert.deepEqual(lobbies.join(invite, 'Eli'), { code: 'closed' });
+});
+
+test('phone receipts survive refresh and started lobbies are idempotent', async () => {
+  const lobbies = new PlayerLobbies();
+  const { id } = lobbies.create();
+  const defuser = lobbies.invite(id, 'defuser');
+  const expert = lobbies.invite(id, 'expert');
+  const start = () => lobbies.start(id, 'simulation');
+  assert.equal((await start()).code, 'incomplete');
+  const { receipt } = lobbies.join(defuser, 'Tess');
+  assert.equal(lobbies.describe(defuser).name, undefined);
+  assert.equal(lobbies.describe(defuser, receipt).name, 'Tess');
+  assert.equal(lobbies.join(defuser, 'Tess').code, 'occupied');
+  assert.equal(lobbies.assign(id, { defuser: 'Someone else' }).code, 'occupied');
+  assert.equal(lobbies.join(expert, 'Dan').status, 'ready');
+  const results = await Promise.all([start(), start()]);
+  assert.deepEqual(results[0], results[1]);
+  assert.equal(results[0].status, 'started');
+  lobbies.close(id);
+  assert.equal(lobbies.describe(defuser, receipt).status, 'started');
+  assert.equal(lobbies.join(defuser, 'Tess', receipt).name, 'Tess');
+});
+
+test('unconfirmed hardware starts cannot start or retransmit a lobby', async () => {
+  const lobbies = new PlayerLobbies();
+  const { id } = lobbies.create();
+  lobbies.assign(id, { defuser: 'Tess', expert: 'Dan' });
+  let calls = 0;
+  const launch = () => { calls++; return { code: 'uncertain' }; };
+  const start = () => lobbies.start(id, 'hardware', launch);
+  assert.equal((await start()).code, 'uncertain');
+  assert.equal((await start()).code, 'uncertain');
+  assert.equal(calls, 1);
+  assert.equal(lobbies.view(id).status, 'starting');
+  lobbies.confirm(id, 'confirmed-id');
+  assert.equal((await start()).runId, 'confirmed-id');
 });
