@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createLevel, gameReducer, initialGame, loadScores, rankScores, DURATION } from './game.js';
+import { COLORS, createLevel, gameReducer, initialGame, loadScores, rankScores, DURATION } from './game.js';
 const start = () => gameReducer(initialGame(), {type:'START', players:{team:'Test',defuser:'A',expert:'B'},now:1000,id:'run-1'});
 function code(g, digits = g.round.code) { for(const key of digits + '#') g = gameReducer(g,{type:'KEY',key}); return g; }
 function clear(g) { g = code(g); for(const index of g.round.required) g=gameReducer(g,{type:'WIRE',index}); return g; }
@@ -10,7 +10,7 @@ test('a complete three-level run requires reconnecting wires and wins with the s
   g = clear(g); assert.equal(g.phase,'ready'); assert.equal(g.remaining,DURATION-10000);
   assert.equal(gameReducer(g,{type:'NEXT',now:20000}),g);
   for(let level=2; level<=3; level++) {
-    for(let index=0; index<3; index++) g=gameReducer(g,{type:'RECONNECT',index});
+    for(let index=0; index<COLORS.length; index++) g=gameReducer(g,{type:'RECONNECT',index});
     g=gameReducer(g,{type:'NEXT',now:level*20000});
     assert.equal(g.level,level); assert.equal(g.round.required.length,level); assert.equal(g.round.wrong,0);
     g=clear(g);
@@ -31,7 +31,7 @@ test('partial entries do not cost strikes; the third incorrect full code loses',
 test('timer uses elapsed time, pauses between levels, and resumes without charging paused time', () => {
   let g=start();g=gameReducer(g,{type:'TICK',now:9000});assert.equal(g.remaining,232000);
   g=clear(g);assert.equal(gameReducer(g,{type:'TICK',now:90000}),g);
-  for(let index=0;index<3;index++)g=gameReducer(g,{type:'RECONNECT',index});
+  for(let index=0;index<COLORS.length;index++)g=gameReducer(g,{type:'RECONNECT',index});
   g=gameReducer(g,{type:'NEXT',now:100000});g=gameReducer(g,{type:'TICK',now:101000});assert.equal(g.remaining,231000);
   g=gameReducer(g,{type:'TICK',now:400000});assert.equal(g.remaining,0);assert.equal(g.phase,'lost');
 });
@@ -41,6 +41,10 @@ test('correct code preserves leading zeros and either module can be completed fi
   assert.equal(g.phase,'playing');g=code(g,'0012');assert.equal(g.phase,'ready');
 });
 test('level generation has unique wires and cards with corresponding colors', () => {
+  const round = createLevel(3, () => 0);
+  assert.equal(round.pulled.length, 5);
+  assert.ok(round.required.includes(3));
+  assert.ok(createLevel(3, () => .6).required.includes(4));
   for(let level=1;level<=3;level++)for(let n=0;n<30;n++){
     const r=createLevel(level);assert.equal(new Set(r.required).size,level);assert.match(r.code,/^\d{4}$/);
     r.cards.forEach((card,i)=>assert.equal(Math.floor((card-1)/2),r.required[i]));

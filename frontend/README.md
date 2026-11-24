@@ -1,58 +1,69 @@
-# DEFUSE / React + Vite prototype
+# DEFUSE
 
-A browser front end for the repository's ESP32 game. It works two ways: a standalone **browser simulation**, or a live mirror and keypad for the **real ESP32** over USB (see [Play on the ESP32](#play-on-the-esp32)).
+The ESP32 owns the hardware game and its countdown. A Node.js bridge serves the React console on the laptop and connects to the board over local Wi-Fi or USB. The separate browser simulation still uses one, two, and three wires across its three levels.
 
-## Run
+## Run the laptop console
 
-Requires Node.js 20.19+ or 22.12+ (validated on Node 24).
+From the `frontend` folder on Windows, with Node.js 24 installed:
 
-```sh
-cd /workspace/iot-midterm/frontend
-npm ci --cache /workspace/.npm-cache
-npm run dev
+```powershell
+npm.cmd ci
+npm.cmd test
+npm.cmd run build
+npm.cmd start
 ```
 
-Vite listens on port 5173. The cache argument keeps npm's writes in the workspace in this cloud environment; it is optional on your own computer.
+Open [the laptop console](http://localhost:5173) and choose **Connect Players**. Select **Use ESP32** in Mission Control first when playing with the board. The live console stays on the laptop. For simulation development, run `npm.cmd run dev` while the bridge is stopped and use manual player entry.
 
-```sh
-npm test       # game, leaderboard and device-protocol tests
-npm run build # production assets in dist/
-npm run preview
-```
+## Connect players
+
+1. Open **Connect Players** on the laptop. Connect both phones to the same local network and scan the QR code for each role. If the laptop has multiple network adapters, use the lobby’s network selector to choose the one the phones can reach.
+2. Each phone asks for a player name and confirms the assigned role. Each name replaces its QR code on the laptop as soon as the player joins. If scanning is unavailable, open **Manual entry** and save either or both names from the laptop.
+3. Select **Start Game** after both names appear. The leaderboard uses the two names together as the team name.
+
+Phone onboarding uses TCP port 5174 on the laptop’s local network. Allow that port on the private network if Windows Firewall blocks the join pages. Some guest networks block connections between devices. Manual entry works without phone connectivity.
+
+## Pair the board and set up USB backup
+
+1. Find the ESP32's COM port in Device Manager or Arduino IDE. Connect the cable before starting the bridge and close Arduino Serial Monitor so the bridge can keep the port open.
+2. Copy `server/bridge.example.json` to `server/bridge.local.json`. Set `serialPort` to the COM port. For USB-only operation, remove the entire `wifi` object.
+3. For Wi-Fi, generate a pairing key locally with `node -p "require('node:crypto').randomBytes(32).toString('hex')"`. Put it in `wifi.key`, and copy `bomb_defusal_final/bridge_local.example.h` to `bomb_defusal_final/bridge_local.h`. Enter the same key and identity in the header, plus the 2.4 GHz Wi-Fi credentials and the laptop's local IPv4 address. Both local configuration files are ignored by Git. Replace the previously embedded Wi-Fi password if it is still in use.
+4. Put the laptop and ESP32 on the same LAN. Use a stable address for the laptop and allow inbound TCP 8443 for Node.js on your private network. The optional `wifi.bind` setting limits the listener to a specific local address. The board initiates the authenticated TLS connection. The browser uses loopback port 5173.
+5. In Arduino IDE, open `bomb_defusal_final/bomb_defusal_final.ino`. Use **esp32 by Espressif Systems 4.0.0**, select **ESP32 Dev Module** for the standard ESP32 DevKit, and install the **Keypad**, **Adafruit GFX Library**, and **Adafruit SSD1306** libraries. Flash over USB while the bridge is stopped. Older firmware is incompatible with the current bridge.
+6. Start the bridge and check for **USB READY** in the console before play. A healthy Wi-Fi connection is preferred before a run. A dead link switches to a ready cable after three missed heartbeats or a disconnect. A recovered Wi-Fi link waits for the current USB run to finish. A WAN outage with working local Wi-Fi leaves the active link in place.
+
+The countdown continues on the ESP32 during connection loss. If both links drop, keep playing with the device controls. If a command was in flight, the bridge checks the recovered snapshot for confirmation and never replays the input. If the board lost power or rebooted, the previous run cannot be recovered.
 
 ## Play
 
-1. Select **Start simulation**, enter a team name and both player names, then arm the device. The timer starts immediately.
-2. The Defuser reads the four Morse groups and riddle card IDs. The Expert consults **Expert manual** on another screen and communicates the answers. The manual is static and can be opened independently; live games do not sync across devices. Both roles share this local prototype interface, so role separation is by agreement.
-3. Enter the four-digit code using the keypad or number keys. Submit with the arrow button, `#`, or Enter; clear with the reset button, `*`, or Backspace. Leading zeros count.
-4. Pull only the wire colors matched by the riddle cards. Each level requires both the code and its wires, in either order. A wrong wire, three wrong codes within a level, or an expired timer ends the run.
-5. Reconnect every pulled wire between levels and select **Start level**. The shared four-minute timer pauses between levels. Levels require one, two, and three correct wires respectively.
-6. Clear all three levels to save a score. Rankings favor more time remaining, then fewer incorrect code submissions across the run. Filters cover all time, the past 7 days, or the past 24 hours.
+Connect or enter both player names. In hardware mode, seat all five wires and arm with the on-screen button or physical **A** key. The Defuser relays Morse clues and card numbers, and the Expert uses the manual. The hardware picks one to five distinct wires each level. The countdown is shared across all three levels and pauses while the wires are reseated. A successful run is saved to the laptop browser's existing local leaderboard.
 
-Sound is optional and muted initially. Responsive layouts, keyboard controls, native modal focus handling, and reduced-motion preferences are supported. Fonts are bundled locally.
+The Expert can open the console's **Expert manual** on the laptop or use the printable references below on another screen. The live bridge does not require internet access.
 
-## Play on the ESP32
+### Morse reference
 
-The sketch (`bomb_defusal_final/bomb_defusal_final.ino`) now prints machine-readable `@` lines over USB serial and accepts a few commands; the game rules and the OLED/keypad/buzzer/servo behaviour are unchanged. The device stays in charge: the page shows the board's state live, and the on-screen keypad and Start button act as extra inputs.
+Read one group per digit from left to right. Preserve leading zeros.
 
-1. Upload the updated sketch from the Arduino IDE (115200 baud). Then **close the Serial Monitor**, because only one program can hold the port.
-2. Run the page on **http://localhost** (`npm run dev`, then open `http://localhost:5173`) in **Chrome or Edge on a desktop**. Web Serial does not work in Firefox or Safari, on phones, or on a plain `http://<lan-ip>` address. The page can still be opened that way for simulation mode.
-3. Click **Connect device** and choose the ESP32's port (often "USB Serial", CP210x or CH340). The header changes to **ESP32 LINKED**.
-4. **Start game** enters the team names and tells the board to arm (the same as pressing D on the keypad). Seat every wire, then press A on the keypad or **Start level** on the page. Typing the code on the keypad, the on-screen keypad and the number keys all reach the board.
-5. The wire module mirrors the physical wires and is read-only in this mode: pull real wires. The timer and strikes come from the board. A win is scored from the board's remaining time and saved to the leaderboard.
+| Digit | Morse | Digit | Morse |
+| --- | --- | --- | --- |
+| 0 | `-----` | 5 | `.....` |
+| 1 | `.----` | 6 | `-....` |
+| 2 | `..---` | 7 | `--...` |
+| 3 | `...--` | 8 | `---..` |
+| 4 | `....-` | 9 | `----.` |
 
-Unplugging mid-game abandons that run. Finished results stay visible, and the page falls back to simulation mode. A page opened or refreshed mid-game catches up from the board (`SYNC`).
+### ESP32 card reference
 
-Protocol, one line each, ends with a newline. Device to page: `@HELLO,1`, `@IDLE`, `@READY,level,missingWireMask,secs`, `@LEVEL,level,code,reqWireMask,cards,secs`, `@ENTRY,digits`, `@CODE,OK|BAD,wrong`, `@WIRE,index,OK|BAD`, `@CLEAR,level`, `@TIME,secs`, `@PROGRESS,entry,solved,wrong,pulledMask`, `@WON,secs`, `@LOST,CODE|WIRE|TIME`. Page to device: `SYNC`, `START`, `RESET`, `ARM`, `KEY,x`. Anything not starting with `@` (the sketch's debug text) is ignored. Wire index 0/1/2 is RED/BLACK/BLUE.
+| Cards | Wire |
+| --- | --- |
+| 1, 2 | Red |
+| 3, 4 | Black |
+| 5, 6 | Blue |
+| 7, 8 | White |
+| 9, 10 | Purple |
 
-Troubleshooting: "board did not answer" means the old sketch is still on the board, the Serial Monitor is open, or the wrong port was chosen. If the board reboots when connecting, that is normal (the page retries `SYNC` for about six seconds).
+## Check failover on the actual setup
 
-## Prototype limits
+With the board powered and USB ready, start a run over Wi-Fi and enter part of a code. Cut WAN access while leaving the LAN up and confirm the Wi-Fi link stays active. Then disconnect the board's local Wi-Fi while leaving USB connected. Within four seconds, confirm the console shows USB, the same code entry, and the board's current time. Repeat at the ready and result screens, and confirm the leaderboard saves a win only once. Test startup with USB alone, loss of both links, and a board reboot separately.
 
-- Scores use localStorage under `defuse.scores.v1`, capped at the best 100 successful runs. There are no seeded scores. Failed games are not ranked. Storage failures leave scores available for the current session only.
-- These are browser-specific, editable simulation scores, without authentication or server verification. A shared competition leaderboard needs a backend and authoritative game results.
-- Hardware mode uses USB serial only (no Wi-Fi) and needs a Chromium desktop browser. The protocol was verified by compiling the unchanged sketch on a computer against Arduino stand-ins and driving it from the real page. It has not yet been run on a physical ESP32.
-- Anyone with the page can send `START`/`RESET`/`KEY` to a connected board, which is intended for a classroom demo but offers no security.
-- The six riddle texts are new sample content. Their card-to-color mappings match the sketch. The sketch's wiring notes now match the code: RED/BLACK/BLUE on GPIO 5/18/19, plus servo GPIO 23.
-
-The frontend has no required environment variables or external services.
+The board sends protocol 2 frames over USB at 115200 baud and directly over TLS on Wi-Fi. The bridge uses `SYNC` and `PING` to check links, `TAKE` to select the command transport, and `CMD` with a per-command ID. The board replies with `@HELLO`, `@TAKEN`, `@ACK`, and revisioned `@STATE` snapshots. The console consumes `GET /api/events` and sends commands through `POST /api/commands`.

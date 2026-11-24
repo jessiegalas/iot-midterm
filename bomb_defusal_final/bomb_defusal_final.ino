@@ -1,40 +1,10 @@
-/*
-  *** FINAL VERSION: all 3 levels + title screens + balloon-popper servo (GPIO23). ***
-  - The titles shown on the OLED are set in the "Titles" section near the top.
-  - Servo settings are in the "Balloon-popper servo" section.
-  - Set SERVO_ENABLED to false to test the game without moving the servo.
-
-  ====================================================================
-  TWO-PLAYER BOMB DEFUSAL MINIGAME - ESP32 (classic DevKit V1)
-  ====================================================================
-  Player 1 (the "Defuser"): sits at the device, has NO documents.
-  Player 2 (the "Expert"): has the printed manual, NO view of the device.
-
-  LEVEL 1: 4-digit code (morse) + pull 1 correct wire  (2 decoys)
-  LEVEL 2: 4-digit code (morse) + pull 2 correct wires (1 decoy)
-  LEVEL 3: 4-digit code (morse) + pull all 3 wires
-
-  Pull the WRONG wire at any time -> instant explosion.
-  Enter the WRONG code 3 times    -> instant explosion.
-  Timer hits zero                 -> instant explosion.
-
-  Before EVERY level (including level 1): put all wires back in, then press A on the
-  keypad. The clock only runs while a level is being played.
-  Start / reset the game: press D on the keypad (the onboard BOOT button also works).
-
-  Libraries required (install via Library Manager):
-    - "Keypad" by Chris--A / Mark Stanley
-    - "Adafruit SSD1306"
-    - "Adafruit GFX Library"
-  Board package: "esp32" by Espressif Systems
-  Board selection in Arduino IDE: "ESP32 Dev Module"
-  ====================================================================
-*/
 
 #include <Wire.h>
 #include <Keypad.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "BridgeTransport.h"
+#include "WireDebounce.h"
 
 // ---------------- OLED ----------------
 #define SCREEN_WIDTH 128
@@ -53,7 +23,7 @@ char keys[ROWS][COLS] = {
   {'*','0','#','D'}
 };
 byte rowPins[ROWS] = {13, 14, 27, 26};
-byte colPins[COLS] = {25, 33, 32, 4};
+byte colPins[COLS] = {25, 32, 33, 4};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 // ---------------- Buzzer / LEDs / Start button ----------------
@@ -72,17 +42,14 @@ const char* LEVEL_SUBTITLES[3] = {"Warm-up", "Getting hot", "Sudden death"};
 
 // ---------------- Balloon-popper servo ----------------
 #define SERVO_PIN 23                  // servo signal wire (orange / yellow)
-const bool SERVO_ENABLED = true;      // false = servo NEVER moves (use this while testing!)
+const bool SERVO_ENABLED = true;     // change to true ONLY when the servo is safely mounted
 const int  REST_ANGLE    = 0;         // needle pulled back, away from the balloon
 const int  POP_ANGLE     = 90;        // swing size: 90 or 180 (try 90 first)
 const int  POP_JABS      = 2;         // number of jabs (2 = a second chance to pop)
 const int  SERVO_MIN_US  = 500;       // pulse width for 0 degrees   (SG90: about 500)
 const int  SERVO_MAX_US  = 2400;      // pulse width for 180 degrees (SG90: about 2400)
 
-// Sends the standard 50-per-second servo pulses for `ms` milliseconds so the
-// servo moves to (and briefly holds) `angle`. It only ever runs at the moment
-// of the explosion, so the servo can't twitch during the game and can't
-// interfere with the buzzer's tone() PWM.
+
 void servoHold(int angle, int ms) {
   angle = constrain(angle, 0, 180);
   int pulseUs = map(angle, 0, 180, SERVO_MIN_US, SERVO_MAX_US);
@@ -106,21 +73,27 @@ void popBalloon() {
   }
 }
 
+#define NUM_WIRES 5
+const int MIN_REQUIRED = 1;
+const int MAX_REQUIRED = 5;
+// ---------------- Five defusal wires ----------------
+const char* colorNames[NUM_WIRES] = {"RED", "BLACK", "BLUE", "WHITE", "PURPLE"};
+const int   wirePins[NUM_WIRES]   = {5, 18, 19, 16, 17};
+bool wireBaseline[NUM_WIRES];      // state recorded at the start of each level (should be LOW = wire present)
+bool wireCounted[NUM_WIRES];       // prevents double-triggering the same pull
+WireDebounce wireDebounce[NUM_WIRES];
 
-// ---------------- The 6 defusal wires ----------------
-const char* colorNames[3] = {"RED", "BLACK", "BLUE"};
-const int   wirePins[3]   = {5, 18, 19};
-bool wireBaseline[3];      // state recorded at the start of each level (should be LOW = wire present)
-bool wireCounted[3];       // prevents double-triggering the same pull
 
 // ---------------- Riddle card bank ----------------
 // Each card's flavor text lives in the printed manual, not here.
 // The firmware only needs to know which color each card number maps to.
 struct RiddleCard { int number; const char* color; };
-RiddleCard riddleBank[6] = {
+RiddleCard riddleBank[10] = {
   {1, "RED"},   {2, "RED"},
   {3, "BLACK"}, {4, "BLACK"},
-  {5, "BLUE"},  {6, "BLUE"}
+  {5, "BLUE"},  {6, "BLUE"},
+  {7, "WHITE"},  {8, "WHITE"},
+  {9, "PURPLE"},  {10, "PURPLE"}
 };
 
 // ---------------- Morse table for digits 0-9 ----------------
@@ -135,22 +108,23 @@ const char* morseDigits[10] = {
 // otherwise collide with a plain "IDLE" here.
 enum GameState { GAME_IDLE, GAME_READY, GAME_PLAYING, GAME_LEVEL_CLEARED, GAME_WON, GAME_LOST };
 GameState state = GAME_IDLE;
+const char* lastLossTag = "TIME"; // used to re-sync web clients after a loss
 
 int level = 1;
 int secretCode[4];
 char codeBuffer[5] = "";
 int codeBufLen = 0;
 int wrongCodeTries = 0;
+int totalWrongTries = 0;
 bool codeSolved = false;
 
-int requiredColors[3];     // indices into colorNames/wirePins for THIS level
-int assignedCards[3];      // riddle card numbers shown to the player for THIS level
+int requiredColors[NUM_WIRES];     // indices into colorNames/wirePins for THIS level
+int assignedCards[NUM_WIRES];      // riddle card numbers shown to the player for THIS level
 int requiredCount = 0;
 int wiresPulledCorrect = 0;
 
 unsigned long totalGameSeconds = 240; // 4 minute overall timer - change to taste
-unsigned long levelStartMillis = 0;
-long timeLeft = 0;
+long timeLeft = 240;
 unsigned long lastTickMillis = 0;
 byte lastReadyMask = 255;   // which wires were missing when the ready screen was last drawn
 
@@ -159,133 +133,169 @@ byte lastReadyMask = 255;   // which wires were missing when the ready screen wa
 unsigned long lastWarnBeepMillis = 0;
 const int PANIC_SECONDS   = 3;    // switch to a continuous tone at this point
 
-// ====================================================================
-// HOST LINK (USB serial, 115200 baud) - used by the web frontend
-// ====================================================================
-// Every machine-readable line the device prints starts with '@' so the web app
-// can tell it apart from the human debug text. The game rules are NOT changed:
-// the device stays in charge, the web page just mirrors it (and can press
-// keypad keys / start the game for you).
-//
-// Device -> host (one line each):
-//   @HELLO,1                                   protocol version (boot, and after SYNC)
-//   @IDLE                                      title screen
-//   @READY,level,missingWireMask,secs          waiting for wires + A (level = the one about to start)
-//   @LEVEL,level,code,reqWireMask,cards,secs   level started; cards look like 1:5
-//   @ENTRY,digits                              digits typed so far
-//   @CODE,OK   |   @CODE,BAD,wrongTries
-//   @WIRE,index,OK   |   @WIRE,index,BAD
-//   @CLEAR,level                               level cleared
-//   @TIME,secs                                 once per second while playing
-//   @PROGRESS,entry,solved,wrong,pulledMask    only as part of a SYNC reply
-//   @WON,secs   |   @LOST,CODE|WIRE|TIME
-// Host -> device (end each line with a newline):
-//   SYNC     re-send HELLO plus the current state
-//   START    start a new game (same as D on the keypad), from any state
-//   RESET    abort back to the title screen
-//   ARM      same as pressing A (only works when every wire is seated)
-//   KEY,x    same as pressing keypad key x  (0-9 * # A B C D)
-// Wire index 0/1/2 = RED/BLACK/BLUE. In masks, bit i is wire i.
-char hostBuf[16];
-byte hostLen = 0;
-bool hostSkip = false;   // true while throwing away an over-long line
-char hostKey = 0;        // key injected by the web page; acts like a keypad press
+const int MAX_STRIKES = 3;
+uint32_t revision = 0;
+uint32_t runId = 0;
+char bootId[9];
+char deviceId[13];
+char lease[17] = "";
+char lastCommand[17] = "";
+BridgeTransport::Source controlSource = BridgeTransport::USB;
+unsigned controlGeneration = 0;
+bool changed = true;
+unsigned long feedbackStarted = 0;
+int winSoundStep = 0;
+std::atomic<bool> lossFeedback{false};
 
-// Physical keypad first, then a key sent from the web page.
-char readKey() {
-  char k = keypad.getKey();
-  if (!k && hostKey) { k = hostKey; hostKey = 0; }
-  return k;
+void showIdleScreen();
+void startGame();
+void resetToIdle();
+void beginLevel();
+void enterReady();
+void handleReady();
+void handleKeypad(char key);
+void handleWires();
+void handleTimer();
+void updateWarningBeep();
+void updatePlayingScreen();
+void checkLevelComplete();
+void flashMessage(const char* msg);
+void explode(const char* reason, const char* tag);
+void winGame();
+void showWinScreen();
+byte missingWiresMask();
+
+void sendHello(BridgeTransport::Source source) {
+  char frame[36];
+  snprintf(frame, sizeof(frame), "@HELLO,2,%s,%s", deviceId, bootId);
+  BridgeTransport::send(source, frame);
 }
 
-void sendHello() { Serial.println("@HELLO,1"); }
-
-void sendEntry() {
-  Serial.print("@ENTRY,"); Serial.println(codeBuffer);
-}
-
-void sendReady(byte missing) {
-  Serial.print("@READY,"); Serial.print(level); Serial.print(',');
-  Serial.print(missing); Serial.print(','); Serial.println(timeLeft);
-}
-
-void sendLevel() {
-  byte reqMask = 0;
-  for (int i = 0; i < requiredCount; i++) reqMask |= (1 << requiredColors[i]);
-  Serial.print("@LEVEL,"); Serial.print(level); Serial.print(',');
-  for (int i = 0; i < 4; i++) Serial.print(secretCode[i]);
-  Serial.print(','); Serial.print(reqMask); Serial.print(',');
-  for (int i = 0; i < requiredCount; i++) {
-    if (i) Serial.print(':');
-    Serial.print(assignedCards[i]);
+void sendState(BridgeTransport::Source source) {
+  static const char* phases[] = {"idle", "ready", "playing", "cleared", "won", "lost"};
+  char clues[24] = "";
+  char cards[16] = "";
+  unsigned mask = 0;
+  if (state == GAME_READY) {
+    mask = missingWiresMask();
+  } else if (state != GAME_IDLE) {
+    snprintf(clues, sizeof(clues), "%s:%s:%s:%s", morseDigits[secretCode[0]],
+             morseDigits[secretCode[1]], morseDigits[secretCode[2]], morseDigits[secretCode[3]]);
+    size_t written = 0;
+    for (int i = 0; i < requiredCount; ++i) {
+      written += snprintf(cards + written, sizeof(cards) - written, "%s%d", i ? ":" : "", assignedCards[i]);
+    }
+    for (int i = 0; i < NUM_WIRES; ++i) {
+      if (wireCounted[i]) mask |= 1u << i;
+    }
   }
-  Serial.print(','); Serial.println(timeLeft);
+  char frame[BridgeTransport::FRAME_SIZE];
+  snprintf(frame, sizeof(frame), "@STATE,%s,%lu,%lu,%s,%d,%ld,%s,%d,%d,%d,%u,%s,%s,%s,%s",
+           bootId, static_cast<unsigned long>(runId), static_cast<unsigned long>(revision), phases[state],
+           level, timeLeft, state == GAME_IDLE || state == GAME_READY ? "" : codeBuffer,
+           state == GAME_IDLE || state == GAME_READY ? 0 : wrongCodeTries, totalWrongTries,
+           codeSolved && state != GAME_IDLE && state != GAME_READY ? 1 : 0, mask, clues, cards,
+           state == GAME_LOST ? lastLossTag : "", lastCommand);
+  BridgeTransport::send(source, frame);
 }
 
-void sendProgress() {
-  byte pulled = 0;
-  for (int i = 0; i < 3; i++) if (wireCounted[i]) pulled |= (1 << i);
-  Serial.print("@PROGRESS,"); Serial.print(codeBuffer); Serial.print(',');
-  Serial.print(codeSolved ? 1 : 0); Serial.print(',');
-  Serial.print(wrongCodeTries); Serial.print(','); Serial.println(pulled);
+void publishState() {
+  if (!changed) return;
+  changed = false;
+  ++revision;
+  sendState(BridgeTransport::USB);
+  sendState(BridgeTransport::WIFI);
 }
 
-// Lets a web page that connects in the middle of a game catch up.
-void sendSnapshot() {
-  switch (state) {
-    case GAME_READY:   sendReady(missingWiresMask()); break;
-    case GAME_PLAYING: sendLevel(); sendProgress(); break;
-    default:           Serial.println("@IDLE"); break;   // idle, or a finished game
+bool isToken(const char* text) {
+  return strlen(text) == 16 && strspn(text, "0123456789abcdef") == 16;
+}
+
+bool applyCommand(const char* command) {
+  if (lossFeedback || state == GAME_LEVEL_CLEARED || (state == GAME_WON && winSoundStep < 2)) return false;
+  if (strcmp(command, "START") == 0) {
+    startGame();
+  } else if (strcmp(command, "RESET") == 0) {
+    resetToIdle();
+  } else if (strcmp(command, "ARM") == 0 || strcmp(command, "KEY,A") == 0) {
+    if (state != GAME_READY) return false;
+    if (missingWiresMask() != 0) {
+      tone(BUZZER_PIN, 300, 300);
+      return false;
+    }
+    beginLevel();
+    return state == GAME_PLAYING;
+  } else if (strcmp(command, "KEY,D") == 0 && (state == GAME_IDLE || state == GAME_WON || state == GAME_LOST)) {
+    if (state == GAME_IDLE) startGame();
+    else resetToIdle();
+  } else if (state == GAME_PLAYING && strncmp(command, "KEY,", 4) == 0 && command[4] &&
+             !command[5] && strchr("0123456789*#", command[4])) {
+    handleKeypad(command[4]);
+  } else {
+    return false;
+  }
+  return true;
+}
+
+void processFrame(BridgeTransport::Source source, BridgeTransport::Frame& frame) {
+  char* command = frame.text;
+  if (strcmp(command, "SYNC") == 0 || strcmp(command, "PING") == 0) {
+    sendHello(source);
+    if (command[0] == 'S') sendState(source);
+  } else if (strncmp(command, "TAKE,", 5) == 0 && isToken(command + 5)) {
+    strcpy(lease, command + 5);
+    controlSource = source;
+    controlGeneration = frame.generation;
+    char reply[32];
+    snprintf(reply, sizeof(reply), "@TAKEN,%s", lease);
+    BridgeTransport::send(source, reply);
+    sendState(source);
+  } else if (strncmp(command, "CMD,", 4) == 0 && source == controlSource && frame.generation == controlGeneration) {
+    char* incomingLease = command + 4;
+    char* commandId = strchr(incomingLease, ',');
+    if (!commandId) return;
+    *commandId++ = '\0';
+    if (!lease[0] || strcmp(lease, incomingLease) != 0) return;
+    char* value = strchr(commandId, ',');
+    if (!value) return;
+    *value++ = '\0';
+    if (!isToken(commandId)) return;
+    bool applied = strcmp(lastCommand, commandId) == 0;
+    if (!applied && applyCommand(value)) {
+      strcpy(lastCommand, commandId);
+      changed = true;
+      publishState();
+      applied = true;
+    }
+    char reply[54];
+    snprintf(reply, sizeof(reply), "@ACK,%s,%s,%s", lease, commandId, applied ? "OK" : "REFUSED");
+    BridgeTransport::send(source, reply);
+  }
+}
+
+void pollBridge() {
+  static BridgeTransport::LineReader serial;
+  for (int count = 0; count < 192 && Serial.available(); ++count) {
+    if (serial.add(static_cast<char>(Serial.read()))) processFrame(BridgeTransport::USB, serial.frame);
+  }
+  BridgeTransport::Frame frame;
+  for (int count = 0; count < 4 && BridgeTransport::receiveWifi(frame); ++count) {
+    if (frame.generation == BridgeTransport::connectedGeneration) processFrame(BridgeTransport::WIFI, frame);
   }
 }
 
 void resetToIdle() {
   state = GAME_IDLE;
-  hostKey = 0;
+  level = 1;
+  timeLeft = totalGameSeconds;
+  totalWrongTries = 0;
   noTone(BUZZER_PIN);
   digitalWrite(LED_RED, LOW);
   digitalWrite(LED_GREEN, LOW);
   showIdleScreen();
-  Serial.println("@IDLE");
+  changed = true;
 }
 
-void runHostCommand(const char* cmd) {
-  if (strcmp(cmd, "SYNC") == 0) {
-    sendHello();
-    sendSnapshot();
-  } else if (strcmp(cmd, "START") == 0) {
-    hostKey = 0;
-    startGame();
-  } else if (strcmp(cmd, "RESET") == 0) {
-    resetToIdle();
-  } else if (strcmp(cmd, "ARM") == 0) {
-    hostKey = 'A';
-  } else if (strncmp(cmd, "KEY,", 4) == 0 && cmd[4] != '\0' && cmd[5] == '\0') {
-    if (strchr("0123456789*#ABCD", cmd[4])) hostKey = cmd[4];
-  }
-}
-
-// Collects characters from the USB serial port; runs each complete line.
-void pollHost() {
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '\r') continue;
-    if (c == '\n') {
-      if (!hostSkip && hostLen > 0) {
-        hostBuf[hostLen] = '\0';
-        runHostCommand(hostBuf);
-      }
-      hostLen = 0;
-      hostSkip = false;
-    } else if (hostLen < sizeof(hostBuf) - 1) {
-      hostBuf[hostLen++] = c;
-    } else {
-      hostSkip = true;
-    }
-  }
-}
-
-// ====================================================================
 void setup() {
   Serial.begin(115200);
   pinMode(SERVO_PIN, OUTPUT);
@@ -296,11 +306,11 @@ void setup() {
   pinMode(LED_GREEN, OUTPUT);
   pinMode(START_BUTTON, INPUT_PULLUP);
 
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < NUM_WIRES; i++) {
     pinMode(wirePins[i], INPUT_PULLUP);
   }
-
   Wire.begin(SDA_PIN, SCL_PIN);
+
   Wire.setClock(100000);  // 100kHz - more reliable over breadboard jumper wires
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("OLED not found");
@@ -310,60 +320,76 @@ void setup() {
 
   randomSeed(esp_random());
 
+  snprintf(bootId, sizeof(bootId), "%08lx", static_cast<unsigned long>(esp_random()));
+  snprintf(deviceId, sizeof(deviceId), "%012llx", static_cast<unsigned long long>(ESP.getEfuseMac()) & 0xffffffffffffULL);
   showIdleScreen();
-  sendHello();
-  Serial.println("@IDLE");
+  sendHello(BridgeTransport::USB);
+  BridgeTransport::begin();
 }
 
-// ====================================================================
-// Start / reset: the D key on the keypad. The onboard BOOT button (GPIO0) still
-// works too, as a backup in case the keypad ever misbehaves.
-bool startPressed() {
-  char k = readKey();
-  return (k == 'D') || (digitalRead(START_BUTTON) == LOW);
+bool bootButtonPressed() {
+  static bool raw = HIGH;
+  static bool stable = HIGH;
+  static unsigned long changedAt = 0;
+  bool current = digitalRead(START_BUTTON);
+  if (current != raw) {
+    raw = current;
+    changedAt = millis();
+  }
+  if (raw != stable && millis() - changedAt >= 25) {
+    stable = raw;
+    return stable == LOW;
+  }
+  return false;
 }
 
 void loop() {
-  pollHost();   // commands from the web page (does nothing if no one is connected)
+  pollBridge();
+  const bool bootPressed = bootButtonPressed();
   switch (state) {
     case GAME_IDLE:
-      if (startPressed()) {
-        delay(250); // debounce
-        startGame();
-      }
+      if (keypad.getKey() == 'D' || bootPressed) startGame();
       break;
-
     case GAME_READY:
-      handleReady();   // wait for every wire to be back in, then the A key
+      handleReady();
       break;
-
     case GAME_PLAYING:
-      handleKeypad();
-      if (state != GAME_PLAYING) break;   // exploded or won: leave the result screen alone
-      handleWires();
-      if (state != GAME_PLAYING) break;
-      handleTimer();
-      if (state != GAME_PLAYING) break;
-      updatePlayingScreen();
+      handleKeypad(keypad.getKey());
+      if (state == GAME_PLAYING) handleWires();
+      if (state == GAME_PLAYING) handleTimer();
+      if (state == GAME_PLAYING) updatePlayingScreen();
       break;
-
-    case GAME_WON:
-    case GAME_LOST:
-      if (startPressed()) {
-        delay(250);
-        resetToIdle();
+    case GAME_LEVEL_CLEARED:
+      if (millis() - feedbackStarted >= 900) {
+        ++level;
+        enterReady();
       }
       break;
-
-    default:
+    case GAME_WON:
+      if (winSoundStep == 0 && millis() - feedbackStarted >= 220) {
+        tone(BUZZER_PIN, 1900, 200);
+        ++winSoundStep;
+      }
+      if (winSoundStep == 1 && millis() - feedbackStarted >= 440) {
+        tone(BUZZER_PIN, 2400, 400);
+        showWinScreen();
+        ++winSoundStep;
+      }
+      if (winSoundStep == 2 && (keypad.getKey() == 'D' || bootPressed)) resetToIdle();
+      break;
+    case GAME_LOST:
+      if (!lossFeedback && (keypad.getKey() == 'D' || bootPressed)) resetToIdle();
       break;
   }
+  publishState();
 }
 
 // ====================================================================
 // GAME FLOW
 // ====================================================================
 void startGame() {
+  ++runId;
+  totalWrongTries = 0;
   level = 1;
   timeLeft = totalGameSeconds;
   lastTickMillis = millis();
@@ -374,7 +400,7 @@ void startGame() {
   enterReady();   // level 1 also waits for the wires + the A key
 }
 
-void generateLevel(int lvl) {
+void generateLevel() {
   tone(BUZZER_PIN, 1500, 200);  // round-start beep
   // 1) random 4-digit code
   for (int i = 0; i < 4; i++) secretCode[i] = random(0, 10);
@@ -383,59 +409,50 @@ void generateLevel(int lvl) {
   wrongCodeTries = 0;
   codeSolved = false;
 
-  // 2) pick `lvl` correct wire colors out of 6, no repeats
-  int pool[3] = {0, 1, 2};
-  for (int i = 2; i > 0; i--) { // shuffle
+  // 2) shuffle the 5 wires, then take a RANDOM number of them
+  int pool[NUM_WIRES];
+  for (int i = 0; i < NUM_WIRES; i++) pool[i] = i;
+  for (int i = NUM_WIRES - 1; i > 0; i--) {
     int j = random(0, i + 1);
     int t = pool[i]; pool[i] = pool[j]; pool[j] = t;
   }
-  requiredCount = lvl;
+  requiredCount = random(MIN_REQUIRED, MAX_REQUIRED + 1);
   for (int i = 0; i < requiredCount; i++) requiredColors[i] = pool[i];
 
-  // 3) for each required color, assign a random matching riddle card
+  // 3) for each required wire, pick a random matching riddle card
   for (int i = 0; i < requiredCount; i++) {
     const char* targetColor = colorNames[requiredColors[i]];
-    int matches[4]; int m = 0;
-    for (int c = 0; c < 6; c++) {
+    int matches[10]; int m = 0;
+    for (int c = 0; c < 10; c++) {
       if (strcmp(riddleBank[c].color, targetColor) == 0) matches[m++] = riddleBank[c].number;
     }
     assignedCards[i] = matches[random(0, m)];
   }
 
   // 4) record wire baseline (all should read LOW = wire plugged in)
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < NUM_WIRES; i++) {
     wireBaseline[i] = digitalRead(wirePins[i]);
     wireCounted[i] = false;
+    wireDebounce[i].reset();
   }
   wiresPulledCorrect = 0;
 
-  Serial.print("LEVEL "); Serial.println(lvl);
-  Serial.print("Code: ");
-  for (int i = 0; i < 4; i++) Serial.print(secretCode[i]);
-  Serial.println();
-  Serial.print("Required colors: ");
-  for (int i = 0; i < requiredCount; i++) { Serial.print(colorNames[requiredColors[i]]); Serial.print(" "); }
-  Serial.println();
-  Serial.print("Riddle cards: ");
-  for (int i = 0; i < requiredCount; i++) { Serial.print(assignedCards[i]); Serial.print(" "); }
-  Serial.println();
 }
 
-void handleKeypad() {
-  char k = readKey();
+void handleKeypad(char k) {
   if (!k) return;
 
   if (k == '*') {
     codeBufLen = 0;
     codeBuffer[0] = '\0';
-    sendEntry();
+    changed = true;
   } else if (k >= '0' && k <= '9') {
     if (codeBufLen < 4) {
       codeBuffer[codeBufLen++] = k;
       codeBuffer[codeBufLen] = '\0';
     }
     tone(BUZZER_PIN, 1200, 40);
-    sendEntry();
+    changed = true;
   } else if (k == '#') {
     if (codeBufLen == 4) {
       bool match = true;
@@ -445,12 +462,13 @@ void handleKeypad() {
       if (match) {
         codeSolved = true;
         tone(BUZZER_PIN, 2000, 150);
-        Serial.println("@CODE,OK");
+        changed = true;
       } else {
         wrongCodeTries++;
+        totalWrongTries++;
+        changed = true;
         tone(BUZZER_PIN, 300, 300);
-        Serial.print("@CODE,BAD,"); Serial.println(wrongCodeTries);
-        if (wrongCodeTries >= 3) {
+        if (wrongCodeTries >= MAX_STRIKES) {
           explode("WRONG CODE 3X", "CODE");
           return;
         }
@@ -458,18 +476,20 @@ void handleKeypad() {
     }
     codeBufLen = 0;
     codeBuffer[0] = '\0';
-    sendEntry();
+    changed = true;
   }
 
   checkLevelComplete();
 }
 
 void handleWires() {
-  for (int i = 0; i < 3; i++) {
-    bool nowState = digitalRead(wirePins[i]);
-    if (!wireCounted[i] && wireBaseline[i] == LOW && nowState == HIGH) {
+  const unsigned long now = millis();
+  for (int i = 0; i < NUM_WIRES; i++) {
+    const bool open = digitalRead(wirePins[i]) == HIGH;
+    if (!wireCounted[i] && wireBaseline[i] == LOW && wireDebounce[i].pulled(open, now)) {
       // this wire was just pulled
       wireCounted[i] = true;
+      changed = true;
       bool isRequired = false;
       for (int r = 0; r < requiredCount; r++) {
         if (requiredColors[r] == i) { isRequired = true; break; }
@@ -477,9 +497,7 @@ void handleWires() {
       if (isRequired) {
         wiresPulledCorrect++;
         tone(BUZZER_PIN, 1800, 100);
-        Serial.print("@WIRE,"); Serial.print(i); Serial.println(",OK");
       } else {
-        Serial.print("@WIRE,"); Serial.print(i); Serial.println(",BAD");
         explode("WRONG WIRE PULLED", "WIRE");
         return;
       }
@@ -491,15 +509,15 @@ void handleWires() {
 void checkLevelComplete() {
   if (state != GAME_PLAYING) return;
   if (codeSolved && wiresPulledCorrect >= requiredCount) {
-    Serial.print("@CLEAR,"); Serial.println(level);
+    changed = true;
     if (level >= 3) {
       winGame();
     } else {
       noTone(BUZZER_PIN);
       lastWarnBeepMillis = 0;
-      flashMessage("LEVEL CLEAR!", 900);
-      level++;
-      enterReady();   // wires must be put back and A pressed before the next level
+      state = GAME_LEVEL_CLEARED;
+      feedbackStarted = millis();
+      flashMessage("LEVEL CLEAR!");
     }
   }
 }
@@ -512,7 +530,7 @@ void handleTimer() {
       explode("TIME'S UP", "TIME");
       return;
     }
-    Serial.print("@TIME,"); Serial.println(timeLeft);
+    changed = true;
   }
   updateWarningBeep();
 }
@@ -538,7 +556,8 @@ void updateWarningBeep() {
 // `reason` is shown on the OLED; `tag` (CODE, WIRE or TIME) goes to the web page.
 void explode(const char* reason, const char* tag) {
   state = GAME_LOST;
-  Serial.print("@LOST,"); Serial.println(tag);   // before the slow balloon pop below
+  lastLossTag = tag;
+  changed = true;
   digitalWrite(LED_RED, HIGH);
   digitalWrite(LED_GREEN, LOW);
   tone(BUZZER_PIN, 200, 2000);
@@ -554,20 +573,25 @@ void explode(const char* reason, const char* tag) {
   display.display();
   Serial.print("EXPLODED: "); Serial.println(reason);
 
-  // Pop the balloon LAST, after the screen, LED and buzzer have already reacted
-  popBalloon();
+  lossFeedback = true;
+  if (xTaskCreate([](void*) {
+        popBalloon();
+        lossFeedback = false;
+        vTaskDelete(nullptr);
+      }, "loss-feedback", 3072, nullptr, 1, nullptr) != pdPASS) lossFeedback = false;
 }
 
 void winGame() {
   state = GAME_WON;
-  Serial.print("@WON,"); Serial.println(timeLeft);
+  changed = true;
+  feedbackStarted = millis();
+  winSoundStep = 0;
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_RED, LOW);
   tone(BUZZER_PIN, 1500, 200);
-  delay(220);
-  tone(BUZZER_PIN, 1900, 200);
-  delay(220);
-  tone(BUZZER_PIN, 2400, 400);
+}
+
+void showWinScreen() {
   display.clearDisplay();
   display.setTextSize(2);
   display.setCursor(5, 15);
@@ -608,7 +632,7 @@ void showIdleScreen() {
 // Bit i of the result is set if wire i is NOT seated (its pin reads HIGH).
 byte missingWiresMask() {
   byte m = 0;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < NUM_WIRES; i++) {
     if (digitalRead(wirePins[i]) == HIGH) m |= (1 << i);
   }
   return m;
@@ -616,6 +640,7 @@ byte missingWiresMask() {
 
 void enterReady() {
   state = GAME_READY;
+  changed = true;
   lastReadyMask = 255;   // forces the ready screen to be drawn
 }
 
@@ -629,16 +654,23 @@ void drawReadyScreen(byte missing) {
     printCentered("All wires seated", 38, 1);
     printCentered("Press A to start", 50, 1);
   } else {
-    char names[24];
+    char names[32];
     names[0] = '\0';
-    for (int w = 0; w < 3; w++) {
+    int count = 0;
+    for (int w = 0; w < NUM_WIRES; w++) {
       if (missing & (1 << w)) {
         if (names[0] != '\0') strcat(names, " ");
         strcat(names, colorNames[w]);
+        count++;
       }
     }
     printCentered("Put these wires back:", 36, 1);
-    printCentered(names, 46, 1);
+    if (strlen(names) <= 21) {
+      printCentered(names, 46, 1);
+    } else {
+      snprintf(names, sizeof(names), "%d wires missing", count);
+      printCentered(names, 46, 1);
+    }
     printCentered("then press A", 56, 1);
   }
   display.display();
@@ -649,9 +681,9 @@ void handleReady() {
   if (missing != lastReadyMask) {          // redraw only when something changed
     lastReadyMask = missing;
     drawReadyScreen(missing);
-    sendReady(missing);
+    changed = true;
   }
-  char k = readKey();
+  char k = keypad.getKey();
   if (k == 'A') {
     if (missing == 0) beginLevel();
     else tone(BUZZER_PIN, 300, 300);       // refused: a wire is still out
@@ -659,23 +691,22 @@ void handleReady() {
 }
 
 void beginLevel() {
-  generateLevel(level);        // new code and wires; the wire baseline is taken with every wire seated
-  for (int i = 0; i < 3; i++) {
+  generateLevel();        // new code and wires; the wire baseline is taken with every wire seated
+  for (int i = 0; i < NUM_WIRES; i++) {
     if (wireBaseline[i] == HIGH) { enterReady(); return; }   // a wire wasn't really seated, so ask again
   }
   lastTickMillis = millis();   // the clock only runs while a level is actually being played
   lastWarnBeepMillis = 0;
   state = GAME_PLAYING;
-  sendLevel();
+  changed = true;
 }
 
-void flashMessage(const char* msg, int ms) {
+void flashMessage(const char* msg) {
   display.clearDisplay();
   display.setTextSize(2);
   display.setCursor(5, 25);
   display.println(msg);
   display.display();
-  delay(ms);
 }
 
 void updatePlayingScreen() {
@@ -691,18 +722,21 @@ void updatePlayingScreen() {
   display.print("LEVEL "); display.print(level);
   display.print("  TIME ");
   int mm = timeLeft / 60; int ss = timeLeft % 60;
-  if (mm < 10) display.print("0"); display.print(mm); display.print(":");
-  if (ss < 10) display.print("0"); display.print(ss);
+  if (mm < 10) display.print("0");
+  display.print(mm);
+  display.print(":");
+  if (ss < 10) display.print("0");
+  display.print(ss);
 
   display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
 
-  // Morse code, one digit per line
-  display.setCursor(0, 14);
-  display.print("CODE:");
-  display.setCursor(0, 24);
+  // Morse patterns, displayed on a single line
+    // Morse code as a 2 x 2 table: digits 1-2 on the top row, digits 3-4 on the bottom row
+  const int MORSE_COL_X[2] = {4, 70};
+  const int MORSE_ROW_Y[2] = {14, 24};
   for (int i = 0; i < 4; i++) {
+    display.setCursor(MORSE_COL_X[i % 2], MORSE_ROW_Y[i / 2]);
     display.print(morseDigits[secretCode[i]]);
-    display.print(" ");
   }
   display.setCursor(0, 34);
   display.print("Entered: ");
@@ -724,37 +758,3 @@ void updatePlayingScreen() {
 
   display.display();
 }
-
-/*
-  ====================================================================
-  WIRING NOTES
-  ====================================================================
-  OLED (I2C SSD1306 128x64):
-    VCC -> 3V3      GND -> GND
-    SDA -> GPIO21   SCL -> GPIO22
-
-  4x4 Keypad:
-    Rows -> GPIO13, 14, 27, 26
-    Cols -> GPIO25, 33, 32, 4
-
-  3 defusal wires (each: one end into GPIO pin's breadboard row,
-  other end into the GND rail). These match wirePins[] in the code:
-    RED    -> GPIO5
-    BLACK  -> GPIO18
-    BLUE   -> GPIO19
-  (Internal pull-ups are enabled in code, so no external resistors
-  are needed. Pin reads LOW while the wire is seated, HIGH once pulled.)
-
-  Balloon-popper servo signal -> GPIO23 (see SERVO_PIN)
-
-  USB serial (115200 baud): the web frontend talks to the board over the
-  same USB cable used for uploading - see "HOST LINK" above. Close the
-  Arduino Serial Monitor before connecting the web page (only one program
-  can use the port at a time).
-
-  Buzzer (passive piezo): + -> GPIO15, - -> GND
-  Red LED (through 220ohm resistor): anode -> GPIO12
-  Green LED (through 220ohm resistor): anode -> GPIO2
-  Start/Reset: the D key on the keypad (no extra wiring; the onboard BOOT button on GPIO0 also works as a backup)
-  ====================================================================
-*/

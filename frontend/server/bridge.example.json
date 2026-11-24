@@ -1,0 +1,8 @@
+{
+  "serialPort": "COM3",
+  "wifi": {
+    "identity": "classroom-esp32",
+    "key": "",
+    "bind": "0.0.0.0"
+  }
+}

@@ -1,67 +1,93 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, ArrowDown, ArrowRight, AudioLines, BookOpen, Check, CheckCheck, ChevronRight, CircleHelp, CircuitBoard, Clock3, Cpu, Crosshair, ExternalLink, FileText, Gamepad2, Hash, Headphones, Layers3, LockKeyhole, Play, PlugZap, Radio, RotateCcw, Shield, ShieldCheck, Skull, Terminal, Trophy, Unplug, Usb, Users, Volume2, VolumeX, X } from 'lucide-react';
-import { MORSE, COLORS, DURATION, STORAGE_KEY, RIDDLES, initialGame, gameReducer, clock, loadScores, rankScores, makeId } from './game';
-import { COMMANDS, parseLine } from './device';
-import { openDevice } from './serial';
+import { CircleHelp, CircuitBoard, Crosshair, Play, Radio, ShieldCheck, Volume2, VolumeX, X } from 'lucide-react';
+import { MORSE, COLORS, DURATION, STORAGE_KEY, initialGame, gameReducer, clock, loadScores, rankScores, makeId, recordWin } from './game';
+import { LOCKS, RIDDLE_CARDS } from './expert-manual';
+import { JoinPlayer, PlayerLobby } from './player-lobby';
 import '@fontsource/dm-sans/latin-400.css';
 import '@fontsource/dm-sans/latin-500.css';
 import '@fontsource/dm-sans/latin-600.css';
-import '@fontsource/barlow-condensed/latin-500.css';
-import '@fontsource/barlow-condensed/latin-600.css';
+import '@fontsource/dm-sans/latin-700.css';
 import '@fontsource/ibm-plex-mono/latin-400.css';
 import '@fontsource/ibm-plex-mono/latin-500.css';
 import '@fontsource/ibm-plex-mono/latin-600.css';
 import './styles.css';
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function explainLinkError(err) {
-  if (err?.code === 'UNSUPPORTED') return 'Web Serial is not available here. Use Chrome or Edge on a desktop computer, opened from http://localhost or https://.';
-  if (err?.code === 'NO_REPLY') return 'The port opened but the board did not answer. Upload the updated sketch, close the Arduino Serial Monitor, and pick the ESP32 port.';
-  if (err?.name === 'NetworkError' || err?.name === 'InvalidStateError') return 'Could not open that port. Close the Arduino Serial Monitor (or any other program using it) and try again.';
-  if (err?.name === 'SecurityError') return 'The browser blocked serial access. Open this page from http://localhost or https://.';
-  return `Could not connect: ${err?.message || err}`;
-}
+const pages = [
+  { id: 'console', label: 'Mission control' },
+  { id: 'manual', label: 'Expert manual' },
+  { id: 'leaderboard', label: 'Leaderboard' },
+];
+
+const offlineLink = { status: 'offline', transport: null, connection: null, usbReady: false, notice: '', state: null };
+const commandMessages = {
+  dropped: 'The link changed before that input was sent. Please check the board and try again.',
+  uncertain: 'The link changed before confirming that input. Check the device state before trying again.',
+  offline: 'The game is continuing on the ESP32. Wait for the link or use the physical controls.',
+  busy: 'Too many inputs are waiting. Try again in a moment.',
+};
 
 function App() {
-  const [tab, setTab] = useState('console');
+  const [tab, setTab] = useState('leaderboard');
   const [game, dispatch] = useReducer(gameReducer, undefined, initialGame);
   const [scores, setScores] = useState(() => loadScores(localStorage));
-  const [filter, setFilter] = useState('all');
   const [modal, setModal] = useState(null);
   const [sound, setSound] = useState(false);
   const [storageError, setStorageError] = useState(false);
-  const [players, setPlayers] = useState({ team: '', defuser: '', expert: '' });
-  const [link, setLink] = useState({ status: 'off', error: '' }); // ESP32 USB link: off | connecting | on
-  const conn = useRef(null);
-  const device = link.status === 'on';
+  const [link, setLink] = useState(offlineLink);
+  const [commandError, setCommandError] = useState('');
+  const connectionEpoch = useRef(0);
+  const sendQueue = useRef(Promise.resolve());
+  const device = game.device;
+  const controlsBlocked = device && link.status !== 'connected';
   const audio = useRef(null);
   const prevSecond = useRef(null);
   const playing = game.phase === 'playing';
+  const failed = game.phase === 'lost';
   const result = game.phase === 'won' || game.phase === 'lost';
-  const active = playing || game.phase === 'ready';
-  const ranked = rankScores(scores, filter);
+  const active = playing || game.phase === 'ready' || game.phase === 'cleared';
+  const ranked = tab === 'leaderboard' ? rankScores(scores) : [];
 
   useEffect(() => {
-    if (!playing) return;
+    if (failed) {
+      setTab('console');
+      setModal('failure');
+    }
+  }, [failed]);
+
+  useEffect(() => {
+    if (!playing || controlsBlocked) return;
     const timer = setInterval(() => dispatch({ type: 'TICK', now: performance.now() }), 100);
     return () => clearInterval(timer);
-  }, [playing]);
+  }, [playing, controlsBlocked]);
   useEffect(() => {
-    function key(e) {
-      if (tab !== 'console' || modal || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === 'Enter' && e.target.tagName === 'BUTTON' && !e.target.closest('.keypad')) return;
-      const k = e.key === 'Enter' ? '#' : e.key === 'Backspace' || e.key === 'Escape' ? '*' : e.key;
-      if (/^[0-9*#]$/.test(k) && playing) { e.preventDefault(); press(k); }
+    if (import.meta.env.DEV) return;
+    const events = new EventSource('/api/events');
+    let previousLink;
+    const update = view => {
+      const currentLink = view.connection;
+      if (currentLink !== previousLink) {
+        ++connectionEpoch.current;
+        previousLink = currentLink;
+      }
+      setLink(view);
+    };
+    events.onmessage = event => update(JSON.parse(event.data));
+    events.onerror = () => update(offlineLink);
+    return () => events.close();
+  }, []);
+
+  useEffect(() => {
+    if (device && link.status === 'connected' && link.state) {
+      dispatch({ type: 'HW_SNAPSHOT', snapshot: link.state, now: performance.now() });
     }
-    window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key);
-  }, [tab, modal, playing, device]);
-  useEffect(() => () => { conn.current?.close(); }, []);
+  }, [device, link.status, link.state]);
+
   useEffect(() => {
     if (game.phase !== 'won') return;
     setScores(rows => {
-      if (rows.some(r => r.id === game.id)) return rows;
-      const next = rankScores([...rows, { id: game.id, team: game.team, defuser: game.defuser, expert: game.expert, remaining: game.remaining, attempts: game.attempts, date: Date.now() }]).slice(0,100);
+      const next = recordWin(rows, game, Date.now());
+      if (next === rows) return rows;
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { setStorageError(true); }
       return next;
     });
@@ -77,112 +103,554 @@ function App() {
     prevSecond.current = second;
   }, [game.remaining, sound, playing]);
   function toggleSound() { if (!sound) { const Audio = window.AudioContext || window.webkitAudioContext; if (Audio) { audio.current ||= new Audio(); audio.current.resume(); } } setSound(!sound); }
-  // Hardware mode: the ESP32 owns the rules, so keys and commands go to the board and its reports come back as DEVICE events.
   async function sendCmd(command) {
-    try { await conn.current.send(command); return true; }
-    catch { setLink(l => ({ ...l, error: 'Could not send to the device. Check the USB cable.' })); return false; }
-  }
-  function press(k) { if (device) sendCmd(COMMANDS.key(k)); else dispatch({ type: 'KEY', key: k }); }
-  async function connectDevice() {
-    if (link.status !== 'off') return;
-    setLink({ status: 'connecting', error: '' });
-    let c = null; let heard = false;
-    try {
-      c = await openDevice({
-        onLine(line) {
-          const event = parseLine(line);
-          if (!event) return;
-          heard = true;
-          if (event.type !== 'HELLO') dispatch({ type: 'DEVICE', event, now: performance.now(), id: makeId() });
-        },
-        onClose(err) {
-          conn.current = null;
-          dispatch({ type: 'HW_DETACH' });
-          setLink({ status: 'off', error: err ? 'Device disconnected. Check the USB cable, then reconnect.' : '' });
-        },
+    const epoch = connectionEpoch.current;
+    const connection = link.connection;
+    const task = sendQueue.current.then(async () => {
+      if (!connection) return { code: 'offline' };
+      if (epoch !== connectionEpoch.current) return { code: 'dropped' };
+      const response = await fetch('/api/commands', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, connection }), signal: AbortSignal.timeout(6500),
       });
-      conn.current = c;
-      dispatch({ type: 'HW_ATTACH' });
-      // Opening the port may reboot the board, so ask until it answers (it replies with HELLO plus its current state).
-      for (let i = 0; i < 10 && !heard; i++) { await c.send(COMMANDS.sync); await sleep(600); }
-      if (!heard) throw Object.assign(new Error('No reply from the board'), { code: 'NO_REPLY' });
-      setLink({ status: 'on', error: '' });
-    } catch (err) {
-      if (c) await c.close().catch(() => {});
-      setLink({ status: 'off', error: err?.name === 'NotFoundError' ? '' : explainLinkError(err) }); // NotFoundError: the port picker was dismissed
-    }
+      return response.json();
+    }).catch(() => ({ code: 'uncertain' }));
+    sendQueue.current = task;
+    const outcome = await task;
+    setCommandError(outcome.ok ? '' : (commandMessages[outcome.code] ?? 'The ESP32 refused that command.'));
+    return Boolean(outcome.ok);
   }
-  function disconnectDevice() { conn.current?.close(); }
-  function restart() { if (device) sendCmd(COMMANDS.reset); dispatch({ type: 'RESET' }); setModal('lobby'); }
-  function start(e) {
-    e.preventDefault();
-    const names = Object.fromEntries(Object.entries(players).map(([k, v]) => [k, v.trim()]));
-    if (device) { dispatch({ type: 'HW_BEGIN', players: names, id: makeId() }); sendCmd(COMMANDS.start); }
-    else dispatch({ type: 'START', players: names, now: performance.now(), id: makeId() });
-    setTab('console'); setModal(null);
+  function press(key) {
+    if (game.round?.solved || controlsBlocked) return;
+    if (device) sendCmd('KEY,' + key);
+    else dispatch({ type: 'KEY', key });
+  }
+  function toggleDevice() {
+    if (device) dispatch({ type: 'HW_DETACH' });
+    else dispatch({ type: 'HW_ATTACH' });
+    setCommandError('');
+  }
+  async function restart() {
+    if (device) {
+      if (!await sendCmd('RESET')) return;
+    } else {
+      dispatch({ type: 'RESET' });
+    }
+    setModal('lobby');
+  }
+  async function start(players) {
+    const names = { ...players, team: players.defuser + ' + ' + players.expert };
+    if (device) {
+      dispatch({ type: 'HW_BEGIN', players: names });
+      if (!await sendCmd('START')) {
+        dispatch({ type: 'HW_START_FAILED' });
+        return;
+      }
+    } else {
+      dispatch({ type: 'START', players: names, now: performance.now(), id: makeId() });
+    }
+    setTab('console');
+    setModal(null);
   }
   function missionAction() {
+    if (failed) {
+      setModal('failure');
+      return;
+    }
+    if (controlsBlocked || game.phase === 'cleared') return;
     if (game.phase === 'idle') setModal('lobby');
-    else if (game.phase === 'ready') { if (device) sendCmd(COMMANDS.arm); else dispatch({ type: 'NEXT', now: performance.now() }); }
-    else if (result) { dispatch({ type: 'RESET' }); setModal('lobby'); }
-    else setModal('reset');
+    else if (game.phase === 'ready') {
+      if (device) sendCmd('ARM');
+      else dispatch({ type: 'NEXT', now: performance.now() });
+    } else if (result) {
+      if (!device) dispatch({ type: 'RESET' });
+      setModal('lobby');
+    } else {
+      setModal('reset');
+    }
   }
-  const topTeams = rankScores(scores).slice(0,3);
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <a className="brand" href="#" onClick={e => { e.preventDefault(); setTab('console'); }} aria-label="Defuse mission control"><span className="brand-mark"><Crosshair size={24}/></span><span>DEFUSE<span className="brand-dot">.</span><small>COMMUNICATION IS SURVIVAL</small></span></a>
-      <div className="nav-label">WORKSPACE <span>01</span></div>
-      <nav aria-label="Main navigation">
-        {[['console', CircuitBoard, 'Mission control'],['manual', BookOpen, 'Expert manual'],['leaderboard', Trophy, 'Leaderboard']].map(([id, Icon, label]) => <button key={id} className={`nav-item ${tab === id ? 'selected' : ''}`} onClick={() => setTab(id)} aria-current={tab === id ? 'page' : undefined}><Icon size={19}/>{label}{tab === id && <span className="nav-dot"/>}</button>)}
-      </nav>
-      <div className="sidebar-bottom"><div className="simulation-note"><span className="tiny-icon"><Cpu size={19}/></span><strong>{device ? 'Wired to the ESP32.' : 'Hardware, meet browser.'}</strong><p>{device ? <>The board runs the game.<br/>This page mirrors it live.</> : <>The ESP32 experience.<br/>No breadboard required.</>}</p><span className="mini-tag">{device ? 'HARDWARE MODE' : 'SIMULATION MODE'}</span></div><button className="help-link" onClick={() => setModal('help')}><CircleHelp size={17}/> How to play <ExternalLink size={13}/></button><div className="sidebar-footer"><span className="online-dot"/> SYSTEM OPERATIONAL <span>v0.1</span></div></div>
-    </aside>
-    <main className="main-shell">
-      <header className="topbar"><div className="breadcrumb">Workspace <ChevronRight size={13}/><span>{tab === 'console' ? 'Mission control' : tab === 'manual' ? 'Expert manual' : 'Leaderboard'}</span></div><div className="topbar-right"><span className="local-label"><span className={`online-dot ${device ? '' : 'idle-dot'}`}/> {device ? 'ESP32 LINKED' : 'LOCAL SESSION'}</span><button className={`button link-button ${device ? 'button-outline' : 'button-primary'}`} onClick={device ? disconnectDevice : connectDevice} disabled={link.status === 'connecting'} title={device ? 'Close the USB link' : 'Pick the ESP32 serial port'}>{device ? <Unplug size={15}/> : <Usb size={15}/>}{link.status === 'connecting' ? 'Connecting…' : device ? 'Disconnect' : 'Connect device'}</button><button className="icon-button" onClick={toggleSound} aria-label={sound ? 'Mute sound' : 'Enable sound'} title={sound ? 'Mute sound' : 'Enable sound'}>{sound ? <Volume2 size={18}/> : <VolumeX size={18}/>}</button><span className="avatar">OP</span></div></header>
-      <div className="page-content">
-        <section className="page-heading"><div><div className="eyebrow"><span/> {tab === 'console' ? 'TWO PLAYERS. ONE CHANCE.' : tab === 'manual' ? 'KNOWLEDGE IS YOUR TOOLKIT.' : 'THE BEST UNDER PRESSURE.'}</div><h1>{tab === 'console' ? 'Mission control' : tab === 'manual' ? 'Expert field manual' : 'The leaderboard'}<span className="heading-slash"> /</span></h1><p>{tab === 'console' ? 'Stay calm. Talk it through. Beat the clock.' : tab === 'manual' ? 'Listen to your Defuser. Find the answer. Keep them alive.' : 'Three levels. Four minutes. A place among the best.'}</p></div><div className="mode-badge"><span className="orange-dot"/><Gamepad2 size={15}/> {device ? 'ESP32 hardware' : 'Browser simulation'}</div></section>
-        {link.error && <div className="link-error" role="alert"><Unplug size={16}/><p>{link.error}</p><button className="icon-button" onClick={() => setLink(l => ({ ...l, error: '' }))} aria-label="Dismiss"><X size={16}/></button></div>}
-        {active && tab !== 'console' && <button className="live-banner" onClick={() => setTab('console')}><Radio size={16}/> Mission {game.phase === 'ready' ? 'between levels' : 'in progress'} <strong>{clock(game.remaining)}</strong><span>Return to console <ArrowRight size={15}/></span></button>}
-        {tab === 'console' && <>
-          <div className="mission-bar"><div className="mission-id"><span className="mission-symbol"><Crosshair size={19}/></span><span><small>ACTIVE OPERATION</small><strong>THE DEFUSAL PROTOCOL</strong></span></div><div className="mission-meta"><span><Users size={15}/> {game.team || '2-player co-op'}</span><span><Layers3 size={15}/> 3 levels</span><span className="difficulty"><i/><i/><i/> STANDARD</span></div></div>
-          <div className="dashboard-grid"><div className="console-main">
-            <section className={`timer-card ${playing && game.remaining < 31000 ? 'critical' : ''} ${game.phase === 'won' ? 'won' : ''}`}>
-              <div className="timer-top"><span><span className={`status-dot ${playing ? 'pulse' : ''}`}/>{playing ? 'DEVICE ARMED' : game.phase === 'ready' ? (game.level === 0 ? 'DEVICE ARMED · NOT STARTED' : 'LEVEL CLEARED · TIMER PAUSED') : game.phase === 'won' ? 'DEVICE DEFUSED' : game.phase === 'lost' ? 'DEVICE DETONATED' : 'AWAITING ACTIVATION'}</span><span className="mono">SYS / 001</span></div>
-              <div className="timer-display">{clock(game.remaining)}<span className="timer-decimal">.{String(Math.floor(game.remaining % 1000 / 10)).padStart(2,'0')}</span></div><div className="timer-subtitle"><Clock3 size={13}/> TIME REMAINING <span>04:00 TOTAL</span></div>
-              <div className="timer-track"><span style={{ width: `${game.remaining / DURATION * 100}%` }}/></div>
-              <div className="timer-bottom"><div className="level-pips">{[1,2,3].map(n => <div key={n} className={game.level > n || game.phase === 'won' || (game.phase === 'ready' && game.level === n) ? 'complete' : game.level === n ? 'current' : ''}><span>{game.level > n || game.phase === 'won' || (game.phase === 'ready' && game.level === n) ? <Check size={12}/> : `0${n}`}</span> LEVEL {n}</div>)}</div><span className="attempts">{[1,2,3].map(n => <i key={n} className={n <= (game.round?.wrong || 0) ? 'used' : ''}/>)}<span>{game.round?.wrong || 0}/3 STRIKES</span></span></div>
-            </section>
-            <div className={`action-strip ${game.phase === 'ready' ? 'ready-strip' : ''}`}><div><span className="action-status"><span className="online-dot"/>{game.phase === 'idle' ? 'READY WHEN YOU ARE' : game.phase === 'ready' ? (game.level === 0 ? 'READY TO BEGIN' : 'LEVEL COMPLETE') : result ? 'MISSION FINISHED' : 'KEEP TALKING'}</span><p aria-live="polite">{game.message || (game.phase === 'idle' ? 'Your Expert has the manual. You have the device.' : 'Describe the clues. Your Expert has the answers.')}</p></div><button className={`button ${playing ? 'button-outline' : 'button-primary'}`} onClick={missionAction} disabled={game.phase === 'ready' && game.round.pulled.some(Boolean)}>{playing ? <RotateCcw size={15}/> : <Play size={15} fill="currentColor"/>}{playing ? 'Restart' : game.phase === 'ready' ? `Start level ${game.level + 1}` : result ? 'Play again' : device ? 'Start game' : 'Start simulation'}{!playing && <ArrowRight size={16}/>}</button>{device && game.phase === 'ready' && <button className="button button-outline" onClick={() => setModal('reset')}><RotateCcw size={15}/>Abort</button>}</div>
-            <div className="modules-grid">
-              <section className="panel code-panel"><PanelTitle icon={Hash} title="Access code" number="01"/><div className="module-description">Relay the signal. Enter the four-digit code.</div><div className="morse-display">{[0,1,2,3].map(i => <div key={i}><span>{game.round ? MORSE[Number(game.round.code[i])] : '·· − ··'}</span><small>DIGIT 0{i+1}</small></div>)}</div><div className={`code-entry ${game.round?.solved ? 'accepted' : ''}`} aria-label="Entered code"><LockKeyhole size={14}/>{game.round?.solved ? <span className="verified"><CheckCheck size={16}/> CODE VERIFIED</span> : <div>{[0,1,2,3].map(i => <span key={i}>{game.round?.entry[i] || <i/>}</span>)}</div>}<span className="entry-tag">4 DIGITS</span></div><div className="keypad">{['1','2','3','4','5','6','7','8','9','*','0','#'].map(k => <button key={k} className={k === '#' ? 'submit-key' : ''} disabled={!playing || game.round?.solved} onClick={() => press(k)} aria-label={k === '*' ? 'Clear code' : k === '#' ? 'Submit code' : `Digit ${k}`}>{k === '*' ? <RotateCcw size={14}/> : k === '#' ? <ArrowRight size={19}/> : k}<small>{k === '*' ? 'CLEAR' : k === '#' ? 'ENTER' : ''}</small></button>)}</div><div className="module-footer"><Terminal size={12}/> Keyboard supported <span>* clear · # submit</span></div></section>
-              <section className="panel wire-panel"><PanelTitle icon={PlugZap} title="Wire module" number="02"/><div className="module-description">Find the right wire. Leave the rest connected.</div><div className="riddle-label"><FileText size={12}/> RIDDLE CARDS <span>{game.round?.cards.length || 1} REQUIRED</span></div><div className="riddle-cards">{(game.round?.cards || ['?']).map(c => <div key={c}><span>FIELD NOTE</span><strong>{typeof c === 'number' ? String(c).padStart(2,'0') : '—'}</strong><span>CARD ID <ArrowDown size={10}/></span></div>)}<p>Ask your Expert<br/>to decode {game.round?.cards.length > 1 ? 'these cards.' : 'this card.'}</p></div><div className="wire-bank">{COLORS.map((c,i) => { const pulled = game.round?.pulled[i]; return <button key={c} className={`wire-row wire-${c.toLowerCase()} ${pulled ? 'disconnected' : ''}`} disabled={device || !(playing && !pulled || game.phase === 'ready' && pulled)} aria-label={device ? `${c.toLowerCase()} wire: ${pulled ? 'out' : 'seated'}` : `${game.phase === 'ready' && pulled ? 'Reconnect' : 'Pull'} ${c.toLowerCase()} wire`} onClick={() => dispatch({ type: game.phase === 'ready' ? 'RECONNECT' : 'WIRE', index: i })}><span className="wire-port"/><span className="wire-cable"><i/><b/></span><span className="wire-end"/><span className="wire-name">{c}<small>{pulled ? game.phase === 'ready' ? device ? 'SEAT IT BACK' : 'RECONNECT ↗' : 'PULLED' : 'CONNECTED'}</small></span></button>; })}</div><div className="wire-warning"><Shield size={14}/><span>One wrong wire ends the mission.</span></div><div className="module-footer"><Activity size={12}/>{device ? 'Mirrors the physical wires on the device' : game.phase === 'ready' ? 'Click pulled wires to reconnect' : 'Click a wire to disconnect it'}<span>{game.round?.pulled.filter(Boolean).length || 0}/3</span></div></section>
+  async function returnAfterFailure() {
+    if (device && !await sendCmd('RESET')) return;
+    if (!device) dispatch({ type: 'RESET' });
+    setModal(null);
+    openTab('leaderboard');
+  }
+  const title = pages.find(page => page.id === tab).label;
+  const liveConsole = (playing || failed) && tab === 'console';
+  const clueModal = modal === 'confirm-clues' || modal === 'clues';
+  const modalTitle = {
+    lobby: 'Connect players', reset: 'Restart mission?', help: 'How to play',
+    failure: 'Mission failed',
+    'confirm-clues': 'Reveal Defuser clues?', clues: 'Defuser clues',
+  }[modal];
+  const connection = link.status === 'connected'
+    ? (link.transport === 'wifi' ? 'Wi-Fi connected' : 'USB connected')
+    : link.status === 'switching' ? 'Switching connection' : 'ESP32 offline';
+  const error = commandError || link.notice || (controlsBlocked
+    ? (link.status === 'switching' ? 'Switching the device link.' : 'Device link lost. The game continues on the ESP32.')
+    : '');
+  function openTab(id) {
+    setTab(id);
+    window.scrollTo(0, 0);
+  }
+
+  return (
+    <>
+      <a className="skip-link" href="#main-content">Skip to content</a>
+      {!liveConsole && <header className="site-header">
+        <div className="site-header-inner">
+          <button className="wordmark" onClick={() => openTab('leaderboard')} aria-label="DEFUSE home">
+            <Crosshair size={22} aria-hidden="true" /> DEFUSE
+          </button>
+          <nav className="navigation" aria-label="Main navigation">
+            {pages.map(({ id, label }) => (
+              <button key={id} onClick={() => openTab(id)} aria-current={tab === id ? 'page' : undefined}>{label}</button>
+            ))}
+          </nav>
+          <div className="utilities">
+            <button className="icon-button" onClick={() => setModal('help')} aria-label="How to play" title="How to play">
+              <CircleHelp size={20} aria-hidden="true" />
+            </button>
+            <button className="icon-button" onClick={toggleSound} aria-label={sound ? 'Mute sound' : 'Enable sound'} title={sound ? 'Mute sound' : 'Enable sound'}>
+              {sound ? <Volume2 size={20} aria-hidden="true" /> : <VolumeX size={20} aria-hidden="true" />}
+            </button>
+          </div>
+        </div>
+      </header>}
+
+      <main id="main-content" className={'workspace' + (liveConsole ? ' live-workspace' : '')} tabIndex={-1}>
+        {!liveConsole && <div className="page-heading">
+          <h1>{title}</h1>
+          {tab === 'console' && (
+            <div className="device-controls">
+              <span><strong>{device ? 'ESP32' : 'Simulation'}</strong><span className="device-connection">{connection}{link.status === 'connected' && link.transport === 'wifi' && (link.usbReady ? ' / USB ready' : ' / USB backup unavailable')}</span></span>
+              {(device || link.status === 'connected') && (
+                <button className="button button-quiet" onClick={toggleDevice} disabled={active}>{device ? 'Use simulation' : 'Use ESP32'}</button>
+              )}
             </div>
+          )}
+        </div>}
 
-          </div><aside className="console-aside">
-            <section className="panel briefing-panel"><PanelTitle icon={Radio} title="Mission briefing"/><div className="briefing-art"><Crosshair size={72} strokeWidth={.7}/><span className="orbit orbit-one"/><span className="orbit orbit-two"/><span className="art-coordinate">35° 40′ N</span><span className="art-label">COMM LINK ESTABLISHED</span><i/></div><h3>Two roles.<br/>One shared objective.</h3><p>You can see the device. Your Expert can see the manual. Communication is your only tool.</p><div className="role-row"><span className="role-icon orange"><Gamepad2 size={17}/></span><div><strong>{game.defuser || 'The Defuser'}</strong><small>Operates the device</small></div><span className="role-pill">YOU</span></div><div className="role-row"><span className="role-icon teal"><Headphones size={17}/></span><div><strong>{game.expert || 'The Expert'}</strong><small>Deciphers the manual</small></div><BookOpen size={14}/></div><button className="text-button" onClick={() => setTab('manual')}>Open expert manual <ArrowRight size={15}/></button></section>
-            <section className="panel activity-panel"><PanelTitle icon={Activity} title="Activity log"/><div className="log-list" aria-live="polite">{game.log.length ? game.log.slice(0,4).map((l,i) => <div className={`log-row ${l.tone}`} key={`${l.text}-${i}`}><span className="log-dot"/><p>{l.text}</p><time>{clock(l.at)}</time></div>) : <><div className="log-row success"><span className="log-dot"/><p>Simulation environment ready.</p><time>SYS</time></div><div className="log-row"><span className="log-dot"/><p>Waiting for team activation.</p><time>SYS</time></div></>}</div></section>
-            <section className="leaderboard-teaser"><div><Trophy size={16}/><strong>Leave your mark.</strong></div><p>{topTeams.length ? `${topTeams[0].team} leads with ${clock(topTeams[0].remaining)} to spare. Can you beat it?` : 'The board is clear. Be the first team to beat all three levels.'}</p><button onClick={() => setTab('leaderboard')}>View leaderboard <ArrowRight size={14}/></button></section>
-          </aside></div>
-        </>}
-        {tab === 'manual' && <Manual/>}
-        {tab === 'leaderboard' && <><div className="stats-grid"><Stat icon={Users} label="SUCCESSFUL MISSIONS" value={String(scores.length).padStart(2,'0')}/><Stat icon={Clock3} label="BEST TIME REMAINING" value={scores.length ? clock(rankScores(scores)[0].remaining) : '—'}/><Stat icon={ShieldCheck} label="RANKED DIFFICULTY" value="Standard"/></div><section className="panel rankings"><div className="rankings-heading"><div><h2>Mission hall of fame <span className="mini-tag">SIMULATION</span></h2><p>Fastest defusals first. Fewer incorrect codes break a tie.</p></div><div className="filter-group" aria-label="Leaderboard time period">{[['all','All time'],['week','7 days'],['day','24 hours']].map(([v,l]) => <button key={v} className={filter === v ? 'active' : ''} onClick={() => setFilter(v)}>{l}</button>)}</div></div>{storageError && <p className="storage-warning">Browser storage is unavailable. This session’s results will disappear after reload.</p>}<div className="table-scroll"><table><thead><tr><th>RANK</th><th>TEAM / OPERATORS</th><th>TIME LEFT</th><th>ERRORS</th><th>COMPLETED</th></tr></thead><tbody>{ranked.map((s,i) => <tr key={s.id} className={s.id === game.id ? 'your-score' : ''}><td><span className={`rank rank-${i}`} >{i === 0 ? <Trophy size={17}/> : String(i + 1).padStart(2,'0')}</span></td><td><strong>{s.team} {s.id === game.id && <span className="mini-tag">YOU</span>}</strong><small>{s.defuser} + {s.expert}</small></td><td className="score-time">{clock(s.remaining)}</td><td>{s.attempts}</td><td>{new Date(s.date).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'})}</td></tr>)}</tbody></table></div>{!ranked.length && <div className="empty-state"><span><Trophy size={32} strokeWidth={1.2}/></span><h3>{scores.length ? 'A new window. A clean slate.' : 'Every legend starts at zero.'}</h3><p>{scores.length ? 'No completed missions in this period. Your next run could change that.' : 'Clear all three levels to earn your place on the board.'}</p><button className="button button-primary" onClick={() => { setTab('console'); if (!active) setModal('lobby'); }}>{active ? 'Return to mission' : 'Begin a mission'}<ArrowRight size={16}/></button></div>}<div className="rankings-footer"><LockKeyhole size={13}/> Saved on this browser · Top 100 completed runs · Prototype scores are unverified</div></section></>}
-        <footer className="page-footer"><span><Crosshair size={12}/> DEFUSE PROTOCOL <span className="footer-divider">/</span> BUILT FOR TWO</span><span>ESP32 INSPIRED <span className="footer-divider">·</span> HUMAN POWERED</span></footer>
+        {error && <div className="notice"><p role="status">{error}</p>{commandError && <button className="icon-button" onClick={() => setCommandError('')} aria-label="Dismiss message"><X size={18} aria-hidden="true" /></button>}</div>}
+        {active && tab !== 'console' && (
+          <button className="return-console" onClick={() => openTab('console')}>
+            {playing ? 'Return to active mission' : 'Return to paused mission'} <strong>{formatRemaining(game.remaining)}</strong>
+          </button>
+        )}
+        {tab === 'console' && (
+          <>
+            <div className="console-board" data-playing={(playing || failed) || undefined}>
+              <CodeModule round={game.phase === 'ready' ? null : game.round}
+                disabled={!playing || controlsBlocked || !!game.round?.solved} onPress={press} />
+              {playing || failed ? (
+                <LiveCountdown remaining={game.remaining} message={game.message} failed={failed} />
+              ) : (
+                <MissionSummary game={game} controlsBlocked={controlsBlocked} storageError={storageError}
+                  onAction={missionAction} onAbort={() => setModal('reset')} onRanking={() => openTab('leaderboard')} />
+              )}
+              <WireModule round={game.round} device={device} phase={game.phase} level={game.level}
+                controlsBlocked={controlsBlocked} onRestart={missionAction} onManual={() => openTab('manual')}
+                onClues={() => setModal('confirm-clues')} onWire={index => {
+                  dispatch({ type: game.phase === 'ready' ? 'RECONNECT' : 'WIRE', index });
+                }} />
+            </div>
+            {!playing && !failed && <SessionDetails game={game} />}
+          </>
+        )}
+        {tab === 'manual' && <Manual />}
+        {tab === 'leaderboard' && (
+          <Leaderboard ranked={ranked} currentId={game.id}
+            storageError={storageError} active={active} onPlay={() => setModal('lobby')} />
+        )}
+      </main>
+
+      {modal && (modal !== 'failure' || failed) && (!clueModal || (playing && !device)) && (
+        <Dialog key={clueModal ? modal : 'game'} title={modalTitle}
+          className={modal === 'failure' ? 'failure-dialog' : modal === 'lobby' ? 'player-connection-dialog' : undefined} onClose={() => setModal(null)}>
+          {modal === 'failure' && (
+            <>
+              <p>{game.message}</p>
+              {controlsBlocked && <p>Reconnect the ESP32 before returning to the leaderboard.</p>}
+              {commandError && <p role="status">{commandError}</p>}
+              <div className="dialog-actions">
+                <button className="button button-quiet" onClick={() => setModal(null)}>Review result</button>
+                <button className="button button-primary" onClick={returnAfterFailure} disabled={controlsBlocked}>Return to leaderboard</button>
+              </div>
+            </>
+          )}
+          {modal === 'confirm-clues' && (
+            <>
+              <p>Make sure only the Defuser can see this screen before revealing the clues.</p>
+              <div className="dialog-actions">
+                <button className="button button-quiet" onClick={() => setModal(null)}>Cancel</button>
+                <button className="button button-primary" onClick={() => setModal('clues')}>Reveal clues</button>
+              </div>
+            </>
+          )}
+          {modal === 'clues' && <DefuserClues round={game.round} />}
+          {modal === 'lobby' && (
+            <PlayerLobby device={device} controlsBlocked={controlsBlocked} onStart={start} commandError={commandError} />
+          )}
+          {modal === 'reset' && (
+            <>
+              <p>This run will be discarded. Completed scores stay on the leaderboard.</p>
+              <div className="dialog-actions">
+                <button className="button button-quiet" onClick={() => setModal(null)}>Keep playing</button>
+                <button className="button button-primary" onClick={restart} disabled={controlsBlocked}>Restart</button>
+              </div>
+            </>
+          )}
+          {modal === 'help' && (
+            <>
+              <ol className="help-steps">
+                <li>The Defuser reads the four Morse groups and card numbers to the Expert.</li>
+                <li>The Expert uses the manual to identify the code and the correct wires.</li>
+                <li>Enter the code and pull the correct wires. A wrong wire, three wrong codes in a level, or running out of time ends the mission.</li>
+                <li>Reconnect the wires between levels. The shared timer pauses until the next level starts.</li>
+              </ol>
+              <button className="button button-primary" onClick={() => setModal(null)}>Done</button>
+            </>
+          )}
+        </Dialog>
+      )}
+    </>
+  );
+}
+
+function MissionSummary({ game, controlsBlocked, storageError, onAction, onAbort, onRanking }) {
+  const { phase, level, remaining, round, device } = game;
+  const wrong = phase === 'ready' ? 0 : round?.wrong || 0;
+  const displayLevel = phase === 'ready' ? level + 1 : level;
+  const label = phase === 'idle' ? (device ? 'Start game' : 'Start simulation')
+    : phase === 'ready' ? `Start level ${displayLevel}`
+    : phase === 'cleared' ? 'Level complete' : 'Play again';
+  const strongAction = phase !== 'cleared';
+  const phaseLabel = {
+    idle: 'Ready to start', ready: level === 0 ? 'Waiting to start' : 'Timer paused', cleared: 'Level complete',
+    won: 'Mission complete', lost: 'Mission failed',
+  }[phase];
+  const message = phase === 'won'
+    ? `${game.attempts} incorrect codes. ${storageError ? 'Score kept for this session.' : 'Score saved to the leaderboard.'}`
+    : game.message || (phase === 'idle' ? 'Decode the clues with your Expert and clear three levels on one clock.' : '');
+  const disabled = controlsBlocked || phase === 'cleared' || (phase === 'ready' && round.pulled.some(Boolean));
+
+  return (
+    <section className="mission-summary" aria-label="Mission status" data-phase={phase}>
+      <ClockReadout remaining={remaining} roundUp={phase === 'ready' || phase === 'cleared'} />
+      <div className="mission-readout">
+        <p className="run-state" aria-live="polite"><span className="status-dot" aria-hidden="true" />{phaseLabel}</p>
+        <MissionFacts level={displayLevel} strikes={wrong} />
       </div>
-    </main>
-    {result && tab === 'console' && <div className="result-banner" role="status"><span className={game.phase === 'won' ? 'result-success' : 'result-danger'}>{game.phase === 'won' ? <ShieldCheck size={25}/> : <Skull size={25}/>}</span><div><strong>{game.phase === 'won' ? 'Mission accomplished.' : 'Signal lost. Mission failed.'}</strong><p>{game.phase === 'won' ? `${clock(game.remaining)} remaining · ${game.attempts} incorrect codes · ${storageError ? 'Score kept for this session' : 'Score saved to leaderboard'}` : game.message}</p></div><button className="text-button" onClick={() => game.phase === 'won' ? setTab('leaderboard') : missionAction()}>{game.phase === 'won' ? 'See ranking' : 'Try again'}<ArrowRight size={15}/></button></div>}
-    {modal && <Dialog title={modal === 'lobby' ? 'Assemble your team.' : modal === 'reset' ? 'Restart the mission?' : 'The protocol is simple.'} onClose={() => setModal(null)}>
-      {modal === 'lobby' ? <form onSubmit={start}><p className="dialog-intro">One device, two perspectives. Choose your call signs and brief your Expert before you begin.</p><label>TEAM NAME<input autoFocus required maxLength={32} value={players.team} onChange={e => setPlayers({...players,team:e.target.value})} placeholder="e.g. Circuit Breakers" pattern=".*\S.*"/></label><div className="form-grid"><label>DEFUSER<input required maxLength={24} value={players.defuser} onChange={e => setPlayers({...players,defuser:e.target.value})} placeholder="Your call sign" pattern=".*\S.*"/></label><label>EXPERT<input required maxLength={24} value={players.expert} onChange={e => setPlayers({...players,expert:e.target.value})} placeholder="Partner’s call sign" pattern=".*\S.*"/></label></div><div className="lobby-summary"><span><Clock3 size={16}/> 4 minutes</span><span><Layers3 size={16}/> 3 levels</span><span><Users size={16}/> 2 players</span></div><p className="dialog-note">{device ? 'The ESP32 is connected. Starting arms the device; seat every wire, then press A on its keypad (or the button here).' : 'Have your Expert open the manual on another screen. This local prototype does not sync between devices. The clock starts immediately.'}</p><button className="button button-primary full" type="submit">{device ? 'Arm device' : 'Arm simulation'} <ArrowRight size={17}/></button></form> : modal === 'reset' ? <><p className="dialog-intro">This run will be discarded. Completed leaderboard scores will stay saved.</p><div className="dialog-actions"><button className="button button-outline" onClick={() => setModal(null)}>Keep playing</button><button className="button button-primary" onClick={restart}>Restart <RotateCcw size={16}/></button></div></> : <><ol className="help-steps"><li><strong>Share the clues.</strong> The Defuser describes the four Morse groups and numbered riddle cards.</li><li><strong>Decode together.</strong> The Expert uses the manual to translate the code and identify the correct wires.</li><li><strong>Defuse the device.</strong> Enter four digits and submit. Pull only the wires matched by your cards.</li><li><strong>Make it through three levels.</strong> Reconnect wires between levels. The shared timer pauses during this step.</li></ol><div className="wire-warning"><Shield size={17}/> A wrong wire, three wrong codes in a level, or an empty timer ends the mission.</div><button className="button button-primary full" onClick={() => setModal(null)}>Understood <Check size={16}/></button></>}
-    </Dialog>}
-  </div>;
-}
-function PanelTitle({icon:Icon, title, number}) { return <div className="panel-title"><span><Icon size={16}/><h2>{title}</h2></span>{number ? <span className="panel-number">MODULE / {number}</span> : <span className="panel-ellipsis">···</span>}</div>; }
-function Stat({icon:Icon,label,value}) {return <div className="panel stat"><span><Icon size={19}/></span><div><small>{label}</small><strong>{value}</strong></div></div>;}
-function Manual() { return <div className="manual-layout"><div><section className="panel manual-intro"><div className="eyebrow">FIELD MANUAL / REV. 01</div><h2>Keep talking.<br/>That’s how you make it out.</h2><p>The Defuser should describe what they see without looking at this manual. Translate each signal, then tell them what to do.</p><div className="manual-pills"><span><Clock3 size={14}/> 4-minute shared timer</span><span><Layers3 size={14}/> 1 → 2 → 3 wires per level</span></div></section><section className="panel manual-section"><PanelTitle icon={AudioLines} title="01 / Morse decoder"/><p>Read each five-symbol group from left to right. Each group represents one digit. Preserve leading zeros.</p><div className="morse-table">{MORSE.map((m,i) => <div key={m}><strong>{i}</strong><span>{m}</span></div>)}</div><div className="manual-example"><span>EXAMPLE</span><code>.---- &nbsp; ..--- &nbsp; ...-- &nbsp; ....-</code><ArrowRight size={16}/><strong>1234</strong></div></section><section className="panel manual-section"><PanelTitle icon={FileText} title="02 / Wire riddles"/><p>Ask for the card IDs on the device. Read each matching riddle and tell the Defuser which color to pull. The order does not matter.</p><div className="riddle-grid">{RIDDLES.map(r => <article key={r.id}><span className="riddle-id">CARD {String(r.id).padStart(2,'0')}</span><p>“{r.text}”</p><span className={`answer answer-${r.color.toLowerCase()}`}><span/> {r.color} WIRE</span></article>)}</div><div className="manual-footnote">Prototype riddle text · Color mappings match the ESP32 sketch.</div></section></div><aside><section className="panel manual-rules"><span className="role-icon orange"><Shield size={22}/></span><h3>Rules of engagement</h3><p><strong>Level 1</strong><br/>Decode the code. Pull 1 correct wire.</p><p><strong>Level 2</strong><br/>Decode a new code. Pull 2 correct wires.</p><p><strong>Level 3</strong><br/>Decode the final code. Pull all 3 wires.</p><div className="rule-divider"/><p><strong>Three strikes per level.</strong><br/>Incorrect codes use a strike. The third ends the game. Incomplete entries use none.</p><p><strong>One wrong wire.</strong><br/>No second chances. Confirm the card before pulling.</p><p><strong>Between levels.</strong><br/>Reconnect every pulled wire, then start the next level. The clock is paused.</p><span className="mini-tag">EXPERT EYES ONLY</span></section></aside></div>; }
-function Dialog({title,children,onClose}) {
-  const ref = useRef(null);
-  const close = useRef(onClose); close.current = onClose;
-  useEffect(() => { const el=ref.current; el.showModal(); return () => el.close(); },[]);
-  return <dialog ref={ref} className="dialog" onCancel={e => {e.preventDefault();close.current();}} onClick={e => {if(e.target === ref.current) close.current();}}><div className="dialog-content"><div className="dialog-heading"><span className="brand-mark"><Crosshair size={22}/></span><button className="icon-button" autoFocus onClick={onClose} aria-label="Close dialog"><X size={19}/></button></div><div className="eyebrow">DEFUSE / SIMULATION</div><h2>{title}</h2>{children}</div></dialog>;
+      <div className="mission-next">
+        <div className="actions">
+          <button className={'button ' + (strongAction ? 'button-primary' : 'button-quiet')} onClick={onAction} disabled={disabled}>
+            {strongAction && <Play size={16} aria-hidden="true" />}{label}
+          </button>
+          {device && phase === 'ready' && <button className="button button-quiet" onClick={onAbort} disabled={controlsBlocked}>Abort</button>}
+          {phase === 'won' && <button className="button button-quiet" onClick={onRanking}>See ranking</button>}
+        </div>
+        {message && <p className="mission-message" role="status">{message}</p>}
+      </div>
+      <TimeTrack remaining={remaining} />
+    </section>
+  );
 }
 
-createRoot(document.getElementById('root')).render(<App/>);
+function LiveCountdown({ remaining, message, failed }) {
+  const urgent = failed || remaining < 31000;
+  return (
+    <section className="live-countdown" aria-label="Mission countdown" data-urgent={urgent || undefined}>
+      <div className="live-countdown-header">
+        <p className="run-state" aria-live="polite"><span className="status-dot" aria-hidden="true" />{failed ? 'Mission failed' : urgent ? 'Time running low' : 'Device armed'}</p>
+        <span className="timer-system" aria-hidden="true">SYS / 001</span>
+      </div>
+      <div className="countdown-ring" style={{ '--remaining': timePercentage(remaining) }}>
+        <ClockReadout remaining={remaining} showFractions />
+        {!failed && remaining > 0 && <span className="countdown-tail" style={{ '--tail-angle': `${timeRatio(remaining) * 360}deg` }} aria-hidden="true"><span /></span>}
+      </div>
+      <p className="mission-message" role="status">{message}</p>
+    </section>
+  );
+}
+
+function ClockReadout({ remaining, showFractions, roundUp }) {
+  const fraction = String(Math.floor(remaining % 1000 / 10)).padStart(2, '0');
+  return (
+    <div className="mission-clock">
+      <span id="clock-label">Time remaining</span>
+      <span className="clock-value" role="timer" aria-labelledby="clock-label">
+        {roundUp ? formatRemaining(remaining) : clock(remaining)}{showFractions && <span className="clock-fraction" aria-hidden="true">.{fraction}</span>}
+      </span>
+    </div>
+  );
+}
+
+function TimeTrack({ remaining }) {
+  return <div className="time-track" aria-hidden="true"><span style={{ width: timePercentage(remaining) }} /></div>;
+}
+
+function timePercentage(remaining) {
+  return `${timeRatio(remaining) * 100}%`;
+}
+
+function timeRatio(remaining) {
+  return Math.min(1, Math.max(0, remaining / DURATION));
+}
+
+function MissionFacts({ level, strikes }) {
+  return (
+    <dl className="mission-facts">
+      <div><dt>Level</dt><dd>{level} <span>/ 3</span></dd></div>
+      <div><dt>Strikes</dt><dd data-has-strikes={strikes > 0 || undefined}>{strikes} <span>/ 3</span></dd></div>
+    </dl>
+  );
+}
+
+function formatRemaining(ms) {
+  return clock(Math.ceil(ms / 1000) * 1000);
+}
+
+function CodeModule({ round, disabled, onPress }) {
+  function handleKey(event) {
+    if (disabled || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === 'Enter' && event.target !== event.currentTarget) return;
+    const key = event.key === 'Enter' ? '#' : event.key === 'Backspace' ? '*' : event.key;
+    if (!/^[0-9*#]$/.test(key)) return;
+    event.preventDefault();
+    onPress(key);
+  }
+  return (
+    <section className="puzzle code-module" aria-labelledby="code-title">
+      <h2 id="code-title" className="sr-only">Keypad</h2>
+      <div className="code-entry">
+        <span>{round?.solved ? 'Code verified' : 'Entered code'}</span>
+        <output aria-label="Entered code">{round?.entry || '—'}</output>
+      </div>
+      <div className="keypad" role="group" aria-label="Code keypad" aria-describedby="keypad-help" tabIndex={disabled ? undefined : 0} onKeyDown={handleKey}>
+        {['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'].map(key => (
+          <button key={key} onClick={() => onPress(key)} disabled={disabled}
+            className={key === '#' ? 'submit-key' : undefined}>
+            {key === '#' ? 'Submit' : key === '*' ? 'Clear' : key}
+          </button>
+        ))}
+      </div>
+      <p id="keypad-help" className="input-help">Focus the keypad for <kbd>0–9</kbd>, <kbd>Enter</kbd> to submit, or <kbd>Backspace</kbd> to clear.</p>
+    </section>
+  );
+}
+
+function WireModule({ round, device, phase, level, onWire, controlsBlocked, onRestart, onManual, onClues }) {
+  const canPull = phase === 'playing';
+  const reconnect = phase === 'ready';
+  const disconnected = round?.pulled.filter(Boolean).length || 0;
+  return (
+    <section className="puzzle wire-module" aria-labelledby="wire-title">
+      {canPull || phase === 'lost' ? <>
+        <MissionFacts level={level} strikes={round?.wrong || 0} />
+        <h2 id="wire-title" className="live-wires-title">Wires</h2>
+      </> : <h2 id="wire-title">Wires</h2>}
+      {reconnect && <p className="module-hint">Reconnect every wire before starting the next level.</p>}
+      {canPull && !device && round.cards.length > 0 && (
+        <button className="button button-quiet private-clue-button" onClick={onClues}>Show Defuser clues</button>
+      )}
+      <div className="wire-summary"><span>Wire bank</span><span>{disconnected} / {COLORS.length} disconnected</span></div>
+      <ul className="wire-bank">
+        {COLORS.map((color, index) => {
+          const name = color.toLowerCase();
+          const pulled = Boolean(round?.pulled[index]);
+          const action = reconnect ? 'Reconnect' : 'Pull';
+          const status = pulled ? 'Disconnected' : 'Connected';
+          const enabled = (canPull && !pulled) || (reconnect && pulled);
+          const wireClass = `wire-row wire-${name}`;
+          const contents = <>
+            <span className="wire-label">{name}</span>
+            <span className="wire-cable" aria-hidden="true" />
+            <span className="wire-terminal" aria-hidden="true" />
+          </>;
+          return (
+            <li key={color}>
+              {device ? <div className={wireClass} data-pulled={pulled}>{contents}<span className="sr-only">{status}</span></div> : (
+                <button className={wireClass} data-pulled={pulled} onClick={() => onWire(index)} disabled={!enabled}
+                  aria-label={`${name} wire, ${status.toLowerCase()}${enabled ? ', ' + action.toLowerCase() : ''}`}>{contents}</button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {device && <p className="input-help">Wire status comes from the physical ESP32.</p>}
+      {canPull && <div className="wire-actions">
+        <button className="button button-quiet" onClick={onManual}>Expert manual</button>
+        <button className="button button-quiet" onClick={onRestart} disabled={controlsBlocked}>Restart</button>
+      </div>}
+      {phase === 'lost' && <div className="wire-actions">
+        <button className="button button-quiet" onClick={onRestart}>Return to leaderboard</button>
+      </div>}
+    </section>
+  );
+}
+
+function DefuserClues({ round }) {
+  return <>
+    <ol className="morse-groups" aria-label="Morse clues">
+      {[...round.code].map((digit, index) => {
+        const group = MORSE[Number(digit)];
+        return <li key={index}>
+          <span className="sr-only">{[...group].map(mark => mark === '.' ? 'dot' : 'dash').join(' ')}</span>
+          <code aria-hidden="true">{group}</code>
+        </li>;
+      })}
+    </ol>
+    <p className="wire-clue-numbers">Wire clue numbers <strong>{round.cards.map(card => String(card).padStart(2, '0')).join(', ')}</strong></p>
+  </>;
+}
+
+function SessionDetails({ game }) {
+  if (!game.team && game.log.length === 0) return null;
+  return (
+    <details className="session-details">
+      <summary>Session details</summary>
+      {game.team && <p><strong>{game.team}</strong> · Defuser: {game.defuser} · Expert: {game.expert}</p>}
+      {game.log.length > 0 && (
+        <ol className="activity-list" aria-label="Recent activity">
+          {game.log.slice(0, 4).map((entry, index) => (
+            <li key={`${entry.at}-${index}`}><span>{entry.text}</span><time>{clock(entry.at)}</time></li>
+          ))}
+        </ol>
+      )}
+    </details>
+  );
+}
+
+function Manual() {
+  return (
+    <div className="manual">
+      <section className="reference" aria-labelledby="roles-title">
+        <h2 id="roles-title">How to play</h2>
+        <p>The Defuser operates the device and reads out the Morse groups and wire clue numbers. The Expert uses this manual and tells the Defuser which digits to enter and which wires to pull. Keep each player’s screen private.</p>
+      </section>
+      <section className="reference" aria-labelledby="morse-title">
+        <h2 id="morse-title">Morse decoder</h2>
+        <p>Match each five-symbol group to one digit. Keep leading zeros.</p>
+        <dl className="morse-reference">
+          {MORSE.map((morse, digit) => <div key={digit}><dt>{digit}</dt><dd><code aria-label={morse.split('').map(mark => mark === '.' ? 'dot' : 'dash').join(' ')}>{morse}</code></dd></div>)}
+        </dl>
+      </section>
+      <section className="reference" aria-labelledby="codebook-title">
+        <h2 id="codebook-title">Codebook</h2>
+        <p>Use A = 0 through Z = 25 for the letter locks.</p>
+        <dl className="morse-reference alphabet-reference">
+          {Array.from('ABCDEFGHIJKLMNOPQRSTUVWXYZ', (letter, index) => <div key={letter}><dt>{letter}</dt><dd>{index}</dd></div>)}
+        </dl>
+        <ul className="help-steps lock-rules">{LOCKS.map(lock => <li key={lock}>{lock}</li>)}</ul>
+      </section>
+      <section className="reference" aria-labelledby="riddles-title">
+        <h2 id="riddles-title">Wire riddles</h2>
+        <p>Find the card number and tell the Defuser which wire to pull. The order does not matter.</p>
+        <div className="riddle-grid">
+          {RIDDLE_CARDS.map(card => (
+            <details key={card.id}>
+              <summary>Card {String(card.id).padStart(2, '0')}</summary>
+              {card.lines.map((line, index) => <p key={index}>{/^[A-Z]{3,}( [A-Z]{1,})+$/.test(line) ? <code>{line}</code> : line}</p>)}
+            </details>
+          ))}
+        </div>
+      </section>
+      <details className="session-details">
+        <summary>Rules by mode</summary>
+        <ul className="help-steps">
+          <li>Both modes have five wires. Simulation requires one, two, then three correct wires. ESP32 levels require one to five.</li>
+          <li>Three wrong codes in one level, a wrong wire, or an expired timer ends the mission. Incomplete codes do not use a strike.</li>
+          <li>Reconnect wires between levels. The four-minute timer pauses until the next level begins.</li>
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+function Leaderboard({ ranked, currentId, storageError, active, onPlay }) {
+  return (
+    <section className="leaderboard" aria-label="Saved scores">
+      <div className="leaderboard-heading">
+        <p>Most time remaining ranks first. Fewer incorrect codes break ties.</p>
+        {!active && <button className="button button-primary" onClick={onPlay}>Connect Players</button>}
+      </div>
+      {storageError && <p className="notice" role="status">Browser storage is unavailable. This session’s results will disappear after reload.</p>}
+      <div className="rankings-layout">
+        <section className="podium-panel" aria-labelledby="podium-title">
+          <h2 id="podium-title">Top finishers</h2>
+          {ranked.length === 0 && <p className="rankings-note" role="status">Clear all three levels to earn a podium spot.</p>}
+          <ol className="podium" aria-label="Top three ranks" role="list">
+            {[ShieldCheck, CircuitBoard, Radio].map((Icon, index) => {
+              const score = ranked[index];
+              const rank = index + 1;
+              return <li key={rank} className="podium-place" data-rank={rank}>
+                <span className="sr-only">Rank {rank}</span>
+                <span className="podium-icon"><Icon aria-hidden="true" size={30} strokeWidth={1.6} /></span>
+                <div className="podium-details">
+                  <strong>{score ? score.team : 'Open spot'}</strong>
+                  {score && <>
+                    <p>{score.defuser} + {score.expert}</p>
+                    <p><span className="score-time">{clock(score.remaining)}</span> left</p>
+                    <p>{score.attempts} {score.attempts === 1 ? 'error' : 'errors'} · {new Date(score.date).toLocaleDateString()}</p>
+                    {score.id === currentId && <span className="current-score">Your run</span>}
+                  </>}
+                </div>
+                <div className="podium-step" aria-hidden="true">{rank}</div>
+              </li>;
+            })}
+          </ol>
+        </section>
+        <section className="runners-panel" aria-labelledby="runners-title">
+          <h2 id="runners-title">Runners-up</h2>
+          {ranked.length > 3 ? (
+            <ol className="runner-list" start={4} aria-label="Ranks four and lower" role="list" tabIndex={0}>
+              {ranked.slice(3).map((score, index) => <li key={score.id}>
+                <span className="runner-rank">{index + 4}</span>
+                <div className="runner-team">
+                  <strong>{score.team}</strong>
+                  <span>{score.defuser} + {score.expert}</span>
+                  <span>{new Date(score.date).toLocaleDateString()}</span>
+                  {score.id === currentId && <span className="current-score">Your run</span>}
+                </div>
+                <div className="runner-score">
+                  <span className="score-time">{clock(score.remaining)}<span className="sr-only"> left</span></span>
+                  <span>{score.attempts} {score.attempts === 1 ? 'error' : 'errors'}</span>
+                </div>
+              </li>)}
+            </ol>
+          ) : <p className="rankings-note">Ranks 4 and below appear here.</p>}
+        </section>
+      </div>
+      <p className="local-note">Scores are saved in this browser.</p>
+    </section>
+  );
+}
+
+function Dialog({ title, children, onClose, className }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    const trigger = document.activeElement;
+    dialog.showModal();
+    dialog.querySelector('input')?.focus();
+    return () => {
+      dialog.close();
+      if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+      else document.getElementById('main-content')?.focus();
+    };
+  }, []);
+  return (
+    <dialog ref={ref} className={className} aria-labelledby="dialog-title" onCancel={event => { event.preventDefault(); onClose(); }}>
+      <div className="dialog-content">
+        <div className="dialog-title">
+          <h2 id="dialog-title">{title}</h2>
+          <button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={20} aria-hidden="true" /></button>
+        </div>
+        {children}
+      </div>
+    </dialog>
+  );
+}
+
+const joinInvite = window.location.pathname.match(/^\/join\/([a-f0-9]{36})$/)?.[1];
+createRoot(document.getElementById('root')).render(joinInvite ? <JoinPlayer invite={joinInvite} /> : <App />);
