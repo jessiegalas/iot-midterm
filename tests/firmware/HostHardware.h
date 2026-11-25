@@ -24,8 +24,15 @@ inline int digitalRead(int pin) { return pinState.at(pin); }
 inline void digitalWrite(int pin, int value) { pinState.at(pin) = value; }
 inline void pinMode(int, int) {}
 inline unsigned toneRequests = 0;
-inline void tone(int, unsigned, unsigned) { ++toneRequests; }
-inline void noTone(int) {}
+inline unsigned toneStops = 0, lastToneFrequency = 0;
+inline bool ledcAttach(int, unsigned, unsigned) { return true; }
+inline unsigned ledcWriteTone(int, unsigned frequency) {
+  if (frequency) ++toneRequests;
+  else ++toneStops;
+  return lastToneFrequency = frequency;
+}
+inline void tone(int pin, unsigned frequency, unsigned) { ledcWriteTone(pin, frequency); }
+inline void noTone(int pin) { ledcWriteTone(pin, 0); }
 inline void delay(unsigned ms) { nowMillis += ms; }
 inline void delayMicroseconds(unsigned) {}
 inline int constrain(int value, int low, int high) { return std::clamp(value, low, high); }

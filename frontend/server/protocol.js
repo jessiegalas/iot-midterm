@@ -1,6 +1,9 @@
-export const VERSION = 2;
+import { RIDDLE_CARDS } from '../src/expert-manual.js';
+
+export const VERSION = 3;
 export const isCommand = value => typeof value === 'string' && /^(START|RESET|ARM|KEY,[0-9*#A-D])$/.test(value);
 
+const wireByCard = new Map(RIDDLE_CARDS.map(card => [card.id, card.wireNumber]));
 const hex = (value, length) => typeof value === 'string' && value.length === length && /^[a-f0-9]+$/.test(value);
 const integer = (value, min, max) => /^\d{1,10}$/.test(value) && Number(value) >= min && Number(value) <= max;
 const phases = new Set(['idle', 'ready', 'playing', 'cleared', 'won', 'lost']);
@@ -30,22 +33,27 @@ export function parseFrame(line) {
       return { type: 'music', boot, run: Number(run), revision: Number(revision), elapsed: Number(elapsed) };
     }
     case '@STATE': {
-      if (values.length !== 15) return null;
-      const [boot, run, revision, phase, level, seconds, entry, wrong, attempts, solved, mask, clueText, cardText, loss, lastCommand] = values;
+      if (values.length !== 18) return null;
+      const [boot, run, revision, phase, level, seconds, entry, wrong, attempts, solved, mask, clueText, cardText, loss, lastCommand,
+        correct, decisions, remainingMs] = values;
       if (!hex(boot, 8) || !integer(run, 0, 0xffffffff) || !integer(revision, 0, 0xffffffff) ||
           !phases.has(phase) || !integer(level, 1, 3) || !integer(seconds, 0, 240) || !/^\d{0,4}$/.test(entry) ||
           !integer(wrong, 0, 3) || !integer(attempts, Number(wrong), 9) || !/^[01]$/.test(solved) || !integer(mask, 0, 31) ||
           (phase === 'lost' ? !['TIME', 'WIRE', 'CODE'].includes(loss) : loss !== '') ||
-          (lastCommand !== '' && !hex(lastCommand, 16))) return null;
+          (lastCommand !== '' && !hex(lastCommand, 16)) || !integer(correct, 0, 8) ||
+          !integer(decisions, 0, 15) || Number(decisions) !== Number(correct) + Number(attempts) + Number(loss === 'WIRE') ||
+          !integer(remainingMs, Math.max(0, 1000 * Number(seconds) - 999), 1000 * Number(seconds))) return null;
       const clues = clueText ? clueText.split(':') : [];
       const cards = cardText ? cardText.split(':') : [];
       if (phase === 'playing' && !clues.length) return null;
       if ((clues.length && (clues.length !== 4 || clues.some(clue => clue.length !== 5 || !morseDigit.test(clue)))) ||
           (Boolean(cards.length) !== Boolean(clues.length)) || cards.length > 5 ||
-          cards.some(card => !integer(card, 1, 10)) || new Set(cards.map(card => Math.floor((Number(card) - 1) / 2))).size !== cards.length) return null;
+          cards.some(card => !integer(card, 1, RIDDLE_CARDS.length)) ||
+          new Set(cards.map(card => wireByCard.get(Number(card)))).size !== cards.length) return null;
       return { type: 'state', boot, run: Number(run), revision: Number(revision), phase, level: Number(level),
         seconds: Number(seconds), entry, wrong: Number(wrong), attempts: Number(attempts), solved: solved === '1',
-        mask: Number(mask), clues, cards: cards.map(Number), loss, lastCommand };
+        mask: Number(mask), clues, cards: cards.map(Number), loss, lastCommand,
+        correct: Number(correct), decisions: Number(decisions), remainingMs: Number(remainingMs) };
     }
     default:
       return null;

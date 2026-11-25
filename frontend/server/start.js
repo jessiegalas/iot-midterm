@@ -1,5 +1,5 @@
 if (!/^24\./.test(process.versions.node)) {
-  console.error('DEFUSE requires Node.js 24 LTS with node:sqlite. Current version: ' + process.version);
+  console.error('Decidefer requires Node.js 24 LTS with node:sqlite. Current version: ' + process.version);
   process.exitCode = 1;
 } else {
   try {
@@ -12,7 +12,7 @@ if (!/^24\./.test(process.versions.node)) {
     try {
       await import('./index.js');
     } catch (error) {
-      console.error('DEFUSE startup failed: ' + error.message);
+      console.error('Decidefer startup failed: ' + error.message);
       process.exitCode = 1;
     }
   }

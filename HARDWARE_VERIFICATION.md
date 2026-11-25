@@ -1,6 +1,17 @@
-# DEFUSE verification
+# Decidefer verification
 
-## Initial and final software runs
+## Decidefer v1 verification
+
+| Check | Result |
+|---|---|
+| Unchanged baseline | 43 JavaScript tests passed before changes. |
+| Final software | 46 JavaScript tests passed with localhost access. The cases cover score math, hint retries, pagination, archived scores, ESP32 recovery, and the 15-card deck. The production frontend build passed. |
+| Browser | Completed the rehearsal and two three-level runs. Verified scoring with both hint tiers and one wrong code. A wrong-wire loss, a three-code loss, a live timeout, an abort, and a reload each appeared on the leaderboard. Reviewed the cards, result panel, and leaderboard at laptop widths. |
+| Firmware | The host harness verified the fixed deck, eight correct decisions in a clean run, buzzer cues and reset, and the Decidefer title and tagline on the simulated 128×64 OLED. The ESP32 Dev Module compiled for USB and for Wi-Fi with placeholder settings. The Wi-Fi build used 84% of flash and 16% of global RAM. |
+
+Physical audio, OLED, and wire behavior still require a board. First-time student timing remains a playtest target.
+
+## Classroom build at 7a9c0a8
 
 | Check | Baseline at 66bb7d0 | Final result |
 |---|---|---|
@@ -43,4 +54,4 @@ These checks require the physical ESP32 and two phones on the intended LAN. They
 | Loss and offline exit | Lose a run and disconnect the board after the console receives the result. | The loss is displayed, and **Return to leaderboard** works while offline. | Pending physical verification |
 | Connection and restart recovery | Start with USB alone. Disconnect during a run, then reconnect to the same board. Repeat after restarting the bridge. Separately reboot the board during a run. | USB alone is usable. Same-boot recovery restores the roster and progress. A reboot leaves the prior result unconfirmed. | Pending physical verification |
 | Wi-Fi to USB | Start over Wi-Fi with USB ready and part of a code entered. Disconnect internet while maintaining the LAN, then interrupt board Wi-Fi. Repeat at the ready and result screens. | Internet loss leaves the LAN working. USB takes over within four seconds with the same entry and current time. No input is replayed or score duplicated. | Pending physical verification |
-| OLED and control timing | Play on the board through ready, active, cleared, win, and all three loss states while watching the console. | Clues, timer, strikes, and outcomes agree. Text is readable, the keypad and wires respond during redraws, and the board buzzer stays silent. | Pending physical verification |
+| OLED, controls, and buzzer | Play on the board through ready, active, cleared, win, and all three loss states while watching the console. | Clues, timer, strikes, and outcomes agree. The keypad and wires respond during redraws. The buzzer plays countdown and result cues and returns to silence on reset. | Pending physical verification |

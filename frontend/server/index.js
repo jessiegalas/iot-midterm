@@ -193,7 +193,7 @@ try {
   }
 } catch (error) {
   if (!stopping) {
-    console.error(`DEFUSE startup failed: ${error.message}`);
+    console.error(`Decidefer startup failed: ${error.message}`);
     process.exitCode = 1;
   }
   stopping = true;

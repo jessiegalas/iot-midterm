@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { COLORS, createLevel, gameReducer, initialGame, loadScores, rankScores, recordWin, DURATION } from './game.js';
+import { LEVEL_CARD_KINDS, RIDDLE_CARDS } from './expert-manual.js';
 const start = () => gameReducer(initialGame(), {type:'START', players:{team:'Test',defuser:'A',expert:'B'},now:1000,id:'run-1'});
 function code(g, digits = g.round.code) { for(const key of digits + '#') g = gameReducer(g,{type:'KEY',key}); return g; }
 function clear(g) { g = code(g); for(const index of g.round.required) g=gameReducer(g,{type:'WIRE',index}); return g; }
@@ -16,17 +17,22 @@ test('a complete three-level run requires reconnecting wires and wins with the s
     g=clear(g);
   }
   assert.equal(g.phase,'won'); assert.equal(g.remaining,DURATION-10000);
+  assert.equal(g.correct, 8);
+  assert.equal(g.decisions, 8);
 });
 test('wrong wire immediately loses; repeated inputs after the result do nothing', () => {
   let g=start(); const wrong=[0,1,2].find(i=>!g.round.required.includes(i));
   g=gameReducer(g,{type:'WIRE',index:wrong}); assert.equal(g.phase,'lost');
+  assert.deepEqual([g.correct, g.decisions, g.loss], [0, 1, 'WIRE']);
   assert.equal(gameReducer(g,{type:'KEY',key:'1'}),g);
 });
 test('partial entries do not cost strikes; the third incorrect full code loses', () => {
   let g=start(); g=gameReducer(g,{type:'KEY',key:'#'}); assert.equal(g.round.wrong,0);
+  assert.equal(g.decisions, 0);
   const wrong=g.round.code==='0000'?'1111':'0000';
   g=code(g,wrong); assert.equal(g.phase,'playing');assert.equal(g.round.wrong,1);
   g=code(g,wrong);g=code(g,wrong);assert.equal(g.phase,'lost');assert.equal(g.attempts,3);
+  assert.deepEqual([g.correct, g.decisions, g.loss], [0, 3, 'CODE']);
 });
 test('timer uses elapsed time, pauses between levels, and resumes without charging paused time', () => {
   let g=start();g=gameReducer(g,{type:'TICK',now:9000});assert.equal(g.remaining,232000);
@@ -47,7 +53,11 @@ test('level generation has unique wires and cards with corresponding colors', ()
   assert.ok(createLevel(3, () => .6).required.includes(4));
   for(let level=1;level<=3;level++)for(let n=0;n<30;n++){
     const r=createLevel(level);assert.equal(new Set(r.required).size,Math.min(level, 2));assert.match(r.code,/^\d{4}$/);
-    r.cards.forEach((card,i)=>assert.equal(Math.floor((card-1)/2),r.required[i]));
+    r.cards.forEach((id, slot) => {
+      const card = RIDDLE_CARDS.find(item => item.id === id);
+      assert.equal(card.wireNumber - 1, r.required[slot]);
+      assert.equal(card.kind, LEVEL_CARD_KINDS[level - 1][slot]);
+    });
   }
 });
 

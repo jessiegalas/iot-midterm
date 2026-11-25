@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { cleanName } from './lobbies.js';
 import { DURATION } from '../src/game.js';
+import { RunHistory, runMigration } from './run-history.js';
 
 const defaultPath = fileURLToPath(new URL('../.data/defuse.sqlite', import.meta.url));
 const scoreId = /^[A-Za-z0-9:_-]{1,128}$/;
@@ -53,7 +54,7 @@ const migrations = [`
     updated INTEGER NOT NULL
   ) STRICT;
   CREATE UNIQUE INDEX one_pending_start_per_board ON pending_hardware_starts(device) WHERE status = 'pending';
-`];
+`, runMigration];
 
 export function validateScore(row, source) {
   if (!row || typeof row !== 'object' || Array.isArray(row) ||
@@ -88,13 +89,13 @@ export class ScoreStore {
       this.db.exec('PRAGMA busy_timeout = 3000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
       this.transaction(() => {
         const version = this.db.prepare('PRAGMA user_version').get().user_version;
-        if (version > migrations.length) throw new Error('The score database needs a newer version of DEFUSE.');
+        if (version > migrations.length) throw new Error('The score database needs a newer version of Decidefer.');
         for (let i = version; i < migrations.length; i++) {
           this.db.exec(migrations[i]);
           this.db.exec('PRAGMA user_version = ' + (i + 1));
         }
       });
-      this.selectScores = this.db.prepare(`SELECT id, team, defuser, expert, remaining, attempts, date
+      const archiveSql = `SELECT id, team, defuser, expert, remaining, attempts, date
         FROM scores WHERE id NOT IN (
           SELECT MIN(CASE WHEN roster.run_id IS NULL THEN board.id ELSE legacy.id END)
           FROM hardware_runs run
@@ -104,7 +105,9 @@ export class ScoreStore {
           LEFT JOIN hardware_rosters roster ON roster.run_id = run.id
           GROUP BY legacy.id HAVING COUNT(*) = 1
         )
-        ORDER BY remaining DESC, attempts, date, id LIMIT 100`);
+        ORDER BY remaining DESC, attempts, date, id`;
+      this.selectScores = this.db.prepare(archiveSql + ' LIMIT 100');
+      this.history = new RunHistory(this.db, this.db.prepare(archiveSql));
       this.selectScore = this.db.prepare('SELECT * FROM scores WHERE id = ?');
       this.insertScore = this.db.prepare('INSERT INTO scores (id, team, defuser, expert, remaining, attempts, date, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
     } catch (error) {

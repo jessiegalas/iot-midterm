@@ -1,4 +1,4 @@
-# DEFUSE setup on Windows with VS Code
+# Decidefer setup on Windows with VS Code
 
 Use **Wi-Fi with USB backup** if the PC and ESP32 can share a local network. Use **USB only** if Wi-Fi is unavailable or the network blocks devices from talking to each other. Both options use the USB cable to upload the firmware.
 
@@ -94,7 +94,7 @@ Plug the ESP32 into the PC with a **USB data cable** and run `arduino-cli board 
    npm.cmd start --prefix frontend
    ```
 
-4. Open the **Console ready** URL printed in the terminal. In **Mission control**, look for **Wi-Fi connected / USB ready** for Option 1 or **USB connected** for Option 2. Select **Use ESP32**. The laptop speaker button controls the soundtrack. The updated ESP32 firmware keeps the buzzer silent.
+4. Open the **Console ready** URL printed in the terminal. In **Mission control**, look for **Wi-Fi connected / USB ready** for Option 1 or **USB connected** for Option 2. Select **Use ESP32**. The laptop speaker button controls the soundtrack. The ESP32 buzzer provides countdown and gameplay feedback during hardware games.
 
 For your next session, plug in the board, open the project in VS Code, and run `npm.cmd start --prefix frontend`. Rebuild after web changes. Re-upload after firmware changes or updates to `bridge_local.h`.
 

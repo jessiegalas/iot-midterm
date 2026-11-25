@@ -1,4 +1,4 @@
-# DEFUSE
+# Decidefer: Dont stop talking
 
 The ESP32 owns the hardware game and its countdown. A Node.js bridge serves the React console on the laptop and connects to the board over local Wi-Fi or USB. The hardware game and browser simulation both use one, two, and two wires across the three timed levels.
 
@@ -13,13 +13,13 @@ npm.cmd ci
 npm.cmd run dev
 ```
 
-Open the console URL printed in the terminal and choose **Connect Players**. Select **Use ESP32** in Mission Control to play with the board. The console stays on the laptop. Development mode builds the phone pages at startup. For a production run, use `npm.cmd run build` followed by `npm.cmd start`. Stop the server with Ctrl+C.
+Open the console URL printed in the terminal and choose **Connect players**. Select **Use ESP32** in **Mission control** to play with the board. The console stays on the laptop. Development mode builds the phone pages at startup. For a production run, use `npm.cmd run build` followed by `npm.cmd start`. Stop the server with Ctrl+C.
 
 The console prefers port 5173 and the phone listener prefers 5174. If a port is occupied, the server prints the fallback address. Set `DEFUSE_CONSOLE_PORT` or `DEFUSE_JOIN_PORT` to require a specific port.
 
 ## Connect players
 
-1. Open **Connect Players** on the laptop. Connect both phones to the same local network and scan the QR code for each role. If the laptop has multiple network adapters, use the lobby’s network selector to choose the one the phones can reach.
+1. Open **Connect players** on the laptop. Connect both phones to the same local network and scan the QR code for each role. If the laptop has multiple network adapters, use the lobby’s network selector to choose the one the phones can reach.
 2. Each phone asks for a player name and confirms the assigned role. Each name replaces its QR code on the laptop. Use **Retry QR**, **Copy Join Link**, or **Manual entry** if scanning is unavailable.
 3. After both names appear, choose **Start test run** or **Start real game**. The same pair continues after the test, and the leaderboard uses both names as the team name.
 
@@ -40,11 +40,15 @@ The countdown continues on the ESP32 during connection loss. If both links drop,
 
 Connect or enter both player names. In hardware mode, seat all five wires and arm with the on-screen button or physical **A** key. The Defuser relays Morse clues and card numbers. The Expert decodes the four digits and solves one card per required wire. The tasks can be completed in either order. The countdown is shared across all three levels and pauses while the wires are reseated. Scores and confirmed hardware rosters are saved in `frontend/.data/defuse.sqlite`.
 
+Use the laptop’s **Expert manual** for the current deck. The untimed Test card P teaches elimination. Level 1 uses direct elimination, Level 2 pairs elimination with a number riddle, and Level 3 pairs a number riddle with a mixed clue. Revealing the first hint costs 5 points. A second hint costs another 10 points. Hints on Test card P are free.
+
+The leaderboard shows every timed run and ranks successful teams by score. Each level cleared earns 250 points. A successful team earns another 250 points and one point per full second left. Each wrong code costs 10 points. Accuracy counts correct codes and wire pulls out of all full submissions and valid pulls.
+
 The leaderboard imports existing scores when opened at their old browser address. If the address changed, open **Transfer browser scores** at the original address to export JSON, then import it on the new console. If the original address still serves an older console without an export button, copy the result of `localStorage.getItem('defuse.scores.v1')` from that page's developer console into a JSON file and import the file.
 
 The Expert can open the manual on the laptop or use the [printable Expert manual](../player%20manual/Player2_Manual_Expert_5wires.docx). Once both players join, choose **Start test run** for one untimed browser round or **Start real game** to go straight into the mission. A completed test takes the same pair into the real game and saves no score. The live bridge does not require internet access.
 
-Starting a test run plays its own loop on the laptop. Use the speaker button to mute or re-enable it. Hot Roadway plays in the timed mission when sound is enabled, switches from 160 BPM to 175 BPM at 30 seconds remaining, and pauses between levels. The updated ESP32 firmware keeps the buzzer silent.
+Starting a test run plays its own loop on the laptop. Use the speaker button to mute or re-enable it. Hot Roadway plays in the timed mission when sound is enabled, switches from 160 BPM to 175 BPM at 30 seconds remaining, and pauses between levels. The ESP32 buzzer sounds during hardware games.
 
 ### Morse reference
 
@@ -72,6 +76,6 @@ Read groups 1 and 2 across the top OLED row, then groups 3 and 4 across the bott
 
 Use the [physical verification checklist](../HARDWARE_VERIFICATION.md) with the ESP32 and two phones.
 
-The board sends protocol 2 frames over USB at 115200 baud and directly over TLS on Wi-Fi. The bridge uses `SYNC` and `PING` to check links, `TAKE` to select the command transport, and `CMD` with a per-command ID. The board replies with `@HELLO`, `@TAKEN`, `@ACK`, and revisioned `@STATE` snapshots. The console consumes `GET /api/events` and sends commands through `POST /api/commands`.
+The board sends protocol 3 frames over USB at 115200 baud and directly over TLS on Wi-Fi. Update the firmware and run the matching console together. The bridge uses `SYNC` and `PING` to check links, `TAKE` to select the command transport, and `CMD` with a per-command ID. The board replies with `@HELLO`, `@TAKEN`, `@ACK`, and revisioned `@STATE` snapshots with decision counts and time remaining. The console consumes `GET /api/events` and sends commands through `POST /api/commands`.
 
 Updated firmware also sends an optional `@MUSIC` timing frame before each playing snapshot. The bridge accepts it only when the boot, run, revision, and elapsed seconds match the active snapshot.

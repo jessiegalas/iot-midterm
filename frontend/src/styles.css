@@ -65,9 +65,10 @@ code, kbd, output { font-family: var(--mono); }
   padding: 0 .25rem;
   font-size: 1.125rem;
   font-weight: 700;
-  letter-spacing: .06em;
 }
-.wordmark svg { color: var(--accent); }
+.wordmark svg { flex: none; color: var(--accent); }
+.wordmark-copy { display: grid; gap: .15rem; text-align: left; line-height: 1.1; }
+.wordmark-tagline { color: var(--muted); font-size: .75rem; font-weight: 500; }
 .navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 1.25rem; }
 .navigation button {
   padding: .35rem .125rem;
@@ -449,19 +450,21 @@ button.wire-row:not(:disabled):is(:hover, :focus-visible) .wire-label { color: v
 .morse-reference dt { color: var(--accent); font-weight: 700; }
 .morse-reference code { white-space: nowrap; }
 .riddle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: .25rem 1.25rem; margin-top: .75rem; }
-.riddle-grid details { border-bottom: 1px solid var(--line); padding-block: .25rem; scroll-margin-top: 1rem; }
-.riddle-grid details[open] { border-bottom-color: var(--control-border); padding-bottom: .75rem; }
-.riddle-grid summary { min-height: 2.75rem; padding-block: .55rem; font-weight: 700; }
-.riddle-grid details p { margin: .3rem 0 .7rem; color: var(--muted); overflow-wrap: anywhere; }
+.riddle-grid > details { border-bottom: 1px solid var(--line); padding-block: .25rem; scroll-margin-top: 1rem; }
+.riddle-grid > details[open] { border-bottom-color: var(--control-border); padding-bottom: .75rem; }
+.riddle-grid > details > summary { min-height: 2.75rem; padding-block: .55rem; font-weight: 700; }
+.riddle-grid p { margin: .3rem 0 .7rem; color: var(--muted); overflow-wrap: anywhere; }
 .manual-wire-key { display: flex; flex-wrap: wrap; gap: .35rem .8rem; margin: .65rem 0; }
 .manual-wire-key div { display: flex; gap: .35rem; align-items: baseline; }
 .manual-wire-key dt { color: var(--accent); font-weight: 700; }
-.manual-wire-key dd, .tag-statements dd { margin: 0; }
-.card-index { display: grid; grid-template-columns: repeat(11, minmax(2.75rem, 1fr)); gap: .5rem; max-width: 36rem; margin: .875rem 0; }
+.manual-wire-key dd { margin: 0; }
+.card-index { display: flex; flex-wrap: wrap; gap: .5rem; margin: .875rem 0; }
 .card-index a {
   display: grid;
   place-items: center;
+  min-width: 2.75rem;
   min-height: 2.75rem;
+  padding-inline: .65rem;
   border: 1px solid var(--line);
   border-radius: .5rem;
   background: var(--inset);
@@ -470,12 +473,17 @@ button.wire-row:not(:disabled):is(:hover, :focus-visible) .wire-label { color: v
   text-decoration: none;
 }
 .card-index a:hover { border-color: var(--accent); }
-.tag-statements { display: grid; gap: .3rem; margin: .5rem 0 .9rem; }
-.tag-statements div { display: grid; grid-template-columns: 4.3rem 1fr; gap: .5rem; }
-.tag-statements dt { font-weight: 700; }
-.tag-tally { display: flex; flex-wrap: wrap; gap: .45rem; min-width: 0; margin: 0 0 .65rem; border: 1px solid var(--line); padding: .5rem; }
-.tag-tally label { display: grid; justify-items: start; gap: .2rem; font-size: .75rem; }
-.tag-tally input { width: 3.1rem; min-height: 2.25rem; color: inherit; background: transparent; border: 1px solid var(--line); font: inherit; padding-inline: .35rem; }
+.wire-clues { display: grid; gap: .35rem; padding-inline-start: 1.2rem; margin: .65rem 0 .85rem; }
+.wire-candidates { display: flex; flex-wrap: wrap; gap: .35rem; min-width: 0; margin: 0; padding: 0; border: 0; }
+.wire-candidates legend { margin-bottom: .38rem; color: var(--muted); font-size: .85rem; padding: 0; }
+.wire-candidates button { display: flex; align-items: center; gap: .3rem; min-height: 2.75rem; padding: .25rem .55rem;
+  border: 1px solid var(--control-border); border-radius: .4rem; color: var(--text); background: var(--inset); font-size: .82rem; }
+.wire-candidates button span { color: var(--accent); font-weight: 700; }
+.wire-candidates button[aria-pressed="true"] { text-decoration: line-through; color: var(--muted); border-style: dashed; }
+.card-hints { display: grid; justify-items: start; gap: .45rem; margin-top: .65rem; }
+.card-hints details { width: 100%; padding: .35rem .65rem; border: 1px solid var(--line); border-radius: .5rem; }
+.card-hints summary { padding-block: .2rem; font-weight: 600; }
+.card-hints p { margin: .3rem 0 .2rem; }
 .leaderboard-heading {
   display: flex;
   flex-wrap: wrap;
@@ -485,8 +493,7 @@ button.wire-row:not(:disabled):is(:hover, :focus-visible) .wire-label { color: v
 }
 .leaderboard-heading p { flex: 1 1 21rem; }
 .leaderboard-heading p, .local-note, .rankings-note { color: var(--muted); font-size: .9375rem; }
-.rankings-layout { display: grid; grid-template-columns: minmax(0, 1.95fr) minmax(17rem, 1fr); gap: 1.1rem; }
-.podium-panel, .runners-panel { min-width: 0; padding: 1.25rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--surface); }
+.podium-panel, .all-runs { min-width: 0; padding: 1.25rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--surface); }
 .podium-panel { display: flex; flex-direction: column; background: radial-gradient(ellipse at 50% 45%, #233039, transparent 68%), var(--inset); }
 .rankings-note { margin-top: .65rem; }
 .podium {
@@ -497,7 +504,8 @@ button.wire-row:not(:disabled):is(:hover, :focus-visible) .wire-label { color: v
   grid-template-areas: "second first third";
   gap: .55rem;
   padding: 0;
-  margin: 1.75rem 0 0;
+  width: min(100%, 44rem);
+  margin: 1.75rem auto 0;
   list-style: none;
   text-align: center;
 }
@@ -527,8 +535,7 @@ button.wire-row:not(:disabled):is(:hover, :focus-visible) .wire-label { color: v
 .podium-details strong { display: block; line-height: 1.2; font-size: 1rem; }
 [data-rank="1"] .podium-details strong { font-size: 1.2rem; }
 .podium-details p { color: var(--muted); font-size: .8125rem; margin-top: .25rem; }
-.score-time, .runner-rank { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.score-time { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.podium-details .podium-points { color: var(--accent); font: 600 .9rem var(--mono); }
 .podium-step {
   display: grid;
   width: 100%;
@@ -540,33 +547,29 @@ button.wire-row:not(:disabled):is(:hover, :focus-visible) .wire-label { color: v
   color: var(--medal);
   font: 600 1.5rem / 1 var(--mono);
 }
-.runner-list { list-style: none; padding: 0 .25rem; margin: .7rem 0 0; max-height: 26rem; overflow: auto; }
-.runner-list li {
-  display: grid;
-  grid-template-columns: 1.8rem minmax(0, 1fr) auto;
-  gap: .5rem;
-  align-items: start;
-  padding-block: .75rem;
-  border-bottom: 1px solid var(--line);
-}
-.runner-list li:last-child { border-bottom: 0; }
-.runner-rank { color: var(--muted); font-size: .875rem; }
-.runner-team, .runner-score { display: grid; gap: .12rem; }
-.runner-team { overflow-wrap: anywhere; }
-.runner-team strong { font-size: .9375rem; line-height: 1.35; }
-.runner-team span, .runner-score > span:last-child { color: var(--quiet); font-size: .8125rem; }
-.runner-score { text-align: right; }
-.current-score, .runner-team .current-score { color: var(--success); font-size: .8125rem; }
+.all-runs { margin-top: 1.1rem; }
+.run-table-wrap { max-width: 100%; overflow-x: auto; margin-top: .75rem; }
+.run-table { width: 100%; min-width: 35rem; border-collapse: collapse; text-align: left; }
+.run-table th, .run-table td { padding: .65rem .55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+.run-table thead th { color: var(--muted); font-size: .8rem; font-weight: 600; white-space: nowrap; }
+.run-table tbody th { min-width: 9.5rem; overflow-wrap: anywhere; }
+.run-table tbody tr[data-current] { background: var(--inset); }
+.run-table tbody tr:last-child > * { border-bottom: 0; }
+.run-table :is(th, td):nth-child(n+3) { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.run-table [data-result="won"] { color: var(--success); }
+.run-table [data-result="lost"] { color: var(--danger); }
+.run-detail { display: block; margin-top: .15rem; color: var(--muted); font-size: .8rem; font-weight: 400; }
+.run-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; margin-top: .8rem; }
+.run-pagination span { color: var(--muted); font-size: .875rem; }
+.run-result { margin-block: 1rem; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--inset); }
+.run-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 5.4rem), 1fr)); gap: .5rem; margin: 0; }
+.run-metrics dt { color: var(--muted); font-size: .8rem; }
+.run-metrics dd { margin: .15rem 0 0; font: 600 1.2rem var(--mono); }
+.run-score-detail { color: var(--muted); font-size: .8rem; margin: .65rem 0 0; }
 .local-note { margin-top: .85rem; }
 
-@media (max-width: 49rem) {
-  .rankings-layout { grid-template-columns: minmax(0, 1fr); }
-  .runner-list { max-height: none; }
-}
-
 @media (max-width: 29rem) {
-  .rankings-layout { gap: .75rem; }
-  .podium-panel, .runners-panel { padding: .875rem; }
+  .podium-panel, .all-runs { padding: .875rem; }
   .podium { gap: .375rem; margin-top: 1rem; }
   .podium-place { --step: 2.25rem; }
   .podium-place[data-rank="1"] { --step: 3rem; }
@@ -712,7 +715,6 @@ dialog::backdrop { background: #0a1017c9; }
   .console-board[data-playing] .keypad { grid-auto-rows: minmax(3rem, 1fr); }
   .wire-module { border: 0; border-top: 1px solid var(--line); margin: 0; padding: 1rem 0 0; }
   .wire-bank { --wire-gutter: 0rem; }
-  .card-index { grid-template-columns: repeat(6, minmax(2.75rem, 1fr)); }
   .riddle-grid { grid-template-columns: 1fr; }
 }
 
@@ -721,7 +723,6 @@ dialog::backdrop { background: #0a1017c9; }
 }
 
 @media (max-width: 23rem) {
-  .card-index { grid-template-columns: repeat(4, minmax(2.75rem, 1fr)); }
 }
 
 @media (forced-colors: active) {

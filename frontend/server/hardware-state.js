@@ -43,7 +43,7 @@ export class HardwareState {
   readRun(row) {
     const players = row.defuser ? { defuser: row.defuser, expert: row.expert, team: row.defuser + ' + ' + row.expert } : null;
     this.view = { snapshot: { ...JSON.parse(row.snapshot), id: row.id, deviceId: row.device, players }, runStatus: row.status,
-      scoreStatus: row.status === 'won' ? row.score ? 'saved' : 'failed' : null };
+      scoreStatus: terminal(row.status) ? row.status === 'lost' || row.score ? 'saved' : 'failed' : null };
   }
 
   stage(command, device, start, { lobbyId = null, players }) {
@@ -143,7 +143,7 @@ export class HardwareState {
       const known = this.view.snapshot?.id === id ? this.view.snapshot.players : null;
       this.view = { snapshot: { ...frame, id, deviceId: device, players: known },
         runStatus: terminal(frame.phase) ? frame.phase : frame.phase === 'idle' ? null : 'active',
-        scoreStatus: frame.phase === 'won' ? 'pending' : null };
+        scoreStatus: terminal(frame.phase) ? 'pending' : null };
     }
     return written;
   }

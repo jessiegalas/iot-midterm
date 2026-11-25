@@ -52,8 +52,8 @@ export class DeviceBridge extends EventEmitter {
       state: this.recorder?.view.snapshot ?? this.state,
       musicClock: this.active ? this.musicClock : null,
       runStatus: this.recorder?.view.runStatus ?? null,
-      scoreStatus: this.recorder?.view.scoreStatus ?? (this.state?.phase === 'won' && !this.recorder ? 'failed' : null),
-      notice: this.notice || (oldFirmware ? 'Update the ESP32 firmware to protocol 2.' :
+      scoreStatus: this.recorder?.view.scoreStatus ?? (['won', 'lost'].includes(this.state?.phase) && !this.recorder ? 'failed' : null),
+      notice: this.notice || (oldFirmware ? 'Update the ESP32 firmware to protocol ' + VERSION + '.' :
         wrongDevice ? 'The standby link belongs to a different ESP32.' :
           this.recorder?.view.runStatus === 'unconfirmed' ? 'The hardware result is unconfirmed. Reconnect to check the board.' :
             this.recorder?.failed ? 'Hardware state could not be saved yet. The bridge will retry.' : ''),

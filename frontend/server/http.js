@@ -1,7 +1,7 @@
 import { isCommand } from './protocol.js';
 import { allowedOrigin, beginEvents, createHttpService, readJson, replyJson, serveFrontend } from './http-responses.js';
 import { serveLobby } from './lobby-http.js';
-import { serveScores } from './score-http.js';
+import { serveRuns, serveScores } from './score-http.js';
 import { cleanName } from './lobbies.js';
 
 const statuses = { invalid: 400, offline: 503, unavailable: 503, busy: 429, refused: 409, dropped: 409, uncertain: 409 };
@@ -49,6 +49,7 @@ export function consoleServer(bridge, { origin: fixedOrigin, dist = new URL('../
     }
 
     if (req.url?.startsWith('/api/scores') && await serveScores(req, res, { scores, origin })) return;
+    if (req.url?.startsWith('/api/runs') && await serveRuns(req, res, { scores, origin })) return;
     const phonePort = typeof joinPort === 'function' ? joinPort() : joinPort;
     if (lobbies && req.url?.startsWith('/api/lobbies') && await serveLobby(req, res, { lobbies, networks: networks(), joinPort: phonePort, origin, startHardware })) return;
     if (req.url?.startsWith('/api/')) return reply(404, { code: 'not-found' });

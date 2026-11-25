@@ -5,6 +5,7 @@
 #include <Adafruit_SSD1306.h>
 #include "BridgeTransport.h"
 #include "WireDebounce.h"
+#include "SoundtrackBeat.h"
 
 // ---------------- OLED ----------------
 #define SCREEN_WIDTH 128
@@ -26,7 +27,7 @@ byte rowPins[ROWS] = {13, 14, 27, 26};
 byte colPins[COLS] = {25, 32, 33, 4};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-// ---------------- Silent buzzer output / LEDs / Start button ----------------
+// ---------------- Buzzer / LEDs / Start button ----------------
 #define BUZZER_PIN   15
 #define LED_RED      12
 #define LED_GREEN    2
@@ -76,15 +77,17 @@ WireDebounce wireDebounce[NUM_WIRES];
 
 
 // ---------------- Riddle card bank ----------------
-// Each card's flavor text lives in the printed manual, not here.
-// The firmware only needs to know which color each card number maps to.
-struct RiddleCard { int number; const char* color; };
-RiddleCard riddleBank[10] = {
-  {1, "RED"},   {2, "RED"},
-  {3, "BLACK"}, {4, "BLACK"},
-  {5, "BLUE"},  {6, "BLUE"},
-  {7, "WHITE"},  {8, "WHITE"},
-  {9, "PURPLE"},  {10, "PURPLE"}
+// Columns follow colorNames. Rows are the three card types in the Expert Manual.
+enum CardKind { ELIMINATION_CARD, NUMBER_CARD, MIXED_CARD };
+constexpr int CARDS_BY_KIND[][NUM_WIRES] = {
+  {2, 4, 6, 8, 10},
+  {1, 3, 5, 7, 9},
+  {11, 12, 13, 14, 15}
+};
+constexpr CardKind CARD_KINDS_BY_LEVEL[][2] = {
+  {ELIMINATION_CARD, ELIMINATION_CARD},
+  {ELIMINATION_CARD, NUMBER_CARD},
+  {NUMBER_CARD, MIXED_CARD}
 };
 
 // ---------------- Morse table for digits 0-9 ----------------
@@ -107,6 +110,8 @@ char codeBuffer[5] = "";
 int codeBufLen = 0;
 int wrongCodeTries = 0;
 int totalWrongTries = 0;
+int correctDecisions = 0;
+int totalDecisions = 0;
 bool codeSolved = false;
 
 int requiredColors[NUM_WIRES];     // indices into colorNames/wirePins for THIS level
@@ -136,6 +141,11 @@ unsigned long feedbackStarted = 0;
 constexpr unsigned long LEVEL_CLEAR_MS = 900;
 constexpr unsigned LEVEL_CLEAR_STEPS = 4;
 unsigned clearedStep = 0;
+uint32_t lastBuzzerBeat = UINT32_MAX;
+unsigned long buzzerStarted = 0;
+unsigned buzzerDuration = 0;
+bool buzzerReady = false;
+unsigned winSoundStep = 0;
 std::atomic<bool> lossFeedback{false};
 bool playingFrameValid = false;
 
@@ -157,9 +167,30 @@ void explode(const char* reason, const char* tag);
 void winGame();
 byte missingWiresMask();
 
+void stopBuzzer() {
+  if (buzzerReady) ledcWriteTone(BUZZER_PIN, 0);
+  buzzerDuration = 0;
+}
+
+void playFeedbackTone(unsigned frequency, unsigned duration) {
+  if (!buzzerReady) return;
+  ledcWriteTone(BUZZER_PIN, frequency);
+  buzzerStarted = millis();
+  buzzerDuration = duration;
+}
+
+void updateWarningBeep() {
+  const auto beat = SoundtrackBeat::at(musicElapsedMillis());
+  if (beat.step == lastBuzzerBeat) return;
+  lastBuzzerBeat = beat.step;
+  if (beat.beep && buzzerDuration == 0) {
+    playFeedbackTone(beat.downbeat ? 1200 : 1000, 45);
+  }
+}
+
 void sendHello(BridgeTransport::Source source) {
   char frame[36];
-  snprintf(frame, sizeof(frame), "@HELLO,2,%s,%s", deviceId, bootId);
+  snprintf(frame, sizeof(frame), "@HELLO,3,%s,%s", deviceId, bootId);
   BridgeTransport::send(source, frame);
 }
 
@@ -182,18 +213,20 @@ void sendState(BridgeTransport::Source source) {
     }
   }
   char frame[BridgeTransport::FRAME_SIZE];
-  // Optional protocol 2 timing frame. Older bridges still receive the regular snapshot.
+  // The soundtrack samples the playing clock before the matching state frame.
   if (state == GAME_PLAYING) {
     snprintf(frame, sizeof(frame), "@MUSIC,%s,%lu,%lu,%lu", bootId,
              static_cast<unsigned long>(runId), static_cast<unsigned long>(revision), musicElapsedMillis());
     BridgeTransport::send(source, frame);
   }
-  snprintf(frame, sizeof(frame), "@STATE,%s,%lu,%lu,%s,%d,%ld,%s,%d,%d,%d,%u,%s,%s,%s,%s",
+  const unsigned long tickFraction = state == GAME_PLAYING ? min(millis() - lastTickMillis, 999UL) : pausedTickMillis;
+  const unsigned long remainingMs = timeLeft > 0 ? timeLeft * 1000UL - tickFraction : 0;
+  snprintf(frame, sizeof(frame), "@STATE,%s,%lu,%lu,%s,%d,%ld,%s,%d,%d,%d,%u,%s,%s,%s,%s,%d,%d,%lu",
            bootId, static_cast<unsigned long>(runId), static_cast<unsigned long>(revision), phases[state],
            level, timeLeft, state == GAME_IDLE || state == GAME_READY ? "" : codeBuffer,
            state == GAME_IDLE || state == GAME_READY ? 0 : wrongCodeTries, totalWrongTries,
            codeSolved && state != GAME_IDLE && state != GAME_READY ? 1 : 0, mask, clues, cards,
-           state == GAME_LOST ? lastLossTag : "", lastCommand);
+           state == GAME_LOST ? lastLossTag : "", lastCommand, correctDecisions, totalDecisions, remainingMs);
   BridgeTransport::send(source, frame);
 }
 
@@ -216,7 +249,11 @@ bool applyCommand(const char* command) {
   } else if (strcmp(command, "RESET") == 0) {
     resetToIdle();
   } else if (strcmp(command, "ARM") == 0 || strcmp(command, "KEY,A") == 0) {
-    if (state != GAME_READY || missingWiresMask() != 0) return false;
+    if (state != GAME_READY) return false;
+    if (missingWiresMask() != 0) {
+      playFeedbackTone(300, 300);
+      return false;
+    }
     beginLevel();
     return state == GAME_PLAYING;
   } else if (strcmp(command, "KEY,D") == 0 && (state == GAME_IDLE || state == GAME_WON || state == GAME_LOST)) {
@@ -279,11 +316,14 @@ void pollBridge() {
 }
 
 void resetToIdle() {
+  stopBuzzer();
   state = GAME_IDLE;
   level = 1;
   timeLeft = totalGameSeconds;
   pausedTickMillis = 0;
   totalWrongTries = 0;
+  correctDecisions = 0;
+  totalDecisions = 0;
   digitalWrite(LED_RED, LOW);
   digitalWrite(LED_GREEN, LOW);
   showIdleScreen();
@@ -297,6 +337,8 @@ void setup() {
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
+  buzzerReady = ledcAttach(BUZZER_PIN, 1200, 10);
+  stopBuzzer();
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   pinMode(START_BUTTON, INPUT_PULLUP);
@@ -340,6 +382,7 @@ bool bootButtonPressed() {
 }
 
 void loop() {
+  if (buzzerDuration && millis() - buzzerStarted >= buzzerDuration) stopBuzzer();
   updateTimer(millis());
   pollBridge();
   const bool bootPressed = bootButtonPressed();
@@ -353,7 +396,10 @@ void loop() {
     case GAME_PLAYING:
       handleKeypad(keypad.getKey());
       if (state == GAME_PLAYING) handleWires();
-      if (state == GAME_PLAYING) updatePlayingScreen();
+      if (state == GAME_PLAYING) {
+        updateWarningBeep();
+        updatePlayingScreen();
+      }
       break;
     case GAME_LEVEL_CLEARED: {
       const unsigned long elapsed = millis() - feedbackStarted;
@@ -370,7 +416,15 @@ void loop() {
       break;
     }
     case GAME_WON:
-      if (keypad.getKey() == 'D' || bootPressed) resetToIdle();
+      if (keypad.getKey() == 'D' || bootPressed) {
+        resetToIdle();
+      } else if (winSoundStep == 0 && millis() - feedbackStarted >= 220) {
+        playFeedbackTone(1900, 200);
+        ++winSoundStep;
+      } else if (winSoundStep == 1 && millis() - feedbackStarted >= 440) {
+        playFeedbackTone(2400, 400);
+        ++winSoundStep;
+      }
       break;
     case GAME_LOST:
       if (!lossFeedback && (keypad.getKey() == 'D' || bootPressed)) resetToIdle();
@@ -383,8 +437,12 @@ void loop() {
 // GAME FLOW
 // ====================================================================
 void startGame() {
+  stopBuzzer();
+  lastBuzzerBeat = UINT32_MAX;
   ++runId;
   totalWrongTries = 0;
+  correctDecisions = 0;
+  totalDecisions = 0;
   level = 1;
   timeLeft = totalGameSeconds;
   lastTickMillis = millis();
@@ -412,14 +470,9 @@ void generateLevel() {
   requiredCount = WIRES_PER_LEVEL[level - 1];
   for (int i = 0; i < requiredCount; i++) requiredColors[i] = pool[i];
 
-  // 3) for each required wire, pick a random matching riddle card
+  // 3) take each level's prescribed card type for the shuffled colors.
   for (int i = 0; i < requiredCount; i++) {
-    const char* targetColor = colorNames[requiredColors[i]];
-    int matches[10]; int m = 0;
-    for (int c = 0; c < 10; c++) {
-      if (strcmp(riddleBank[c].color, targetColor) == 0) matches[m++] = riddleBank[c].number;
-    }
-    assignedCards[i] = matches[random(0, m)];
+    assignedCards[i] = CARDS_BY_KIND[CARD_KINDS_BY_LEVEL[level - 1][i]][requiredColors[i]];
   }
 
   // 4) record wire baseline (all should read LOW = wire plugged in)
@@ -446,16 +499,20 @@ bool handleKeypad(char k) {
     if (codeBufLen < 4) {
       codeBuffer[codeBufLen++] = k;
       codeBuffer[codeBufLen] = '\0';
+      playFeedbackTone(1200, 40);
     }
     changed = true;
   } else if (k == '#') {
     if (codeBufLen == 4) {
+      ++totalDecisions;
       bool match = true;
       for (int i = 0; i < 4; i++) {
         if (codeBuffer[i] - '0' != secretCode[i]) { match = false; break; }
       }
       if (match) {
         codeSolved = true;
+        ++correctDecisions;
+        playFeedbackTone(2000, 150);
         changed = true;
       } else {
         wrongCodeTries++;
@@ -465,6 +522,7 @@ bool handleKeypad(char k) {
           explode("WRONG CODE 3X", "CODE");
           return true;
         }
+        playFeedbackTone(300, 300);
       }
     }
     codeBufLen = 0;
@@ -487,6 +545,7 @@ void handleWires() {
     if (!wireCounted[i] && wireBaseline[i] == LOW && wireDebounce[i].pulled(open, now)) {
       // this wire was just pulled
       wireCounted[i] = true;
+      ++totalDecisions;
       changed = true;
       bool isRequired = false;
       for (int r = 0; r < requiredCount; r++) {
@@ -494,6 +553,8 @@ void handleWires() {
       }
       if (isRequired) {
         wiresPulledCorrect++;
+        ++correctDecisions;
+        playFeedbackTone(1800, 100);
       } else {
         explode("WRONG WIRE PULLED", "WIRE");
         return;
@@ -514,6 +575,7 @@ void checkLevelComplete(unsigned long now) {
       state = GAME_LEVEL_CLEARED;
       feedbackStarted = now;
       clearedStep = 0;
+      playFeedbackTone(1800, 160);
       showClearedScreen();
     }
   }
@@ -539,11 +601,13 @@ unsigned long musicElapsedMillis() {
 
 // `reason` is shown on the OLED; `tag` (CODE, WIRE or TIME) goes to the web page.
 void explode(const char* reason, const char* tag) {
+  pausedTickMillis = min(millis() - lastTickMillis, 999UL);
   state = GAME_LOST;
   lastLossTag = tag;
   changed = true;
   digitalWrite(LED_RED, HIGH);
   digitalWrite(LED_GREEN, LOW);
+  playFeedbackTone(200, 2000);
   showResultScreen("FAILED", reason, false);
   Serial.print("EXPLODED: "); Serial.println(reason);
 
@@ -556,7 +620,11 @@ void explode(const char* reason, const char* tag) {
 }
 
 void winGame() {
+  pausedTickMillis = min(millis() - lastTickMillis, 999UL);
   state = GAME_WON;
+  feedbackStarted = millis();
+  winSoundStep = 0;
+  playFeedbackTone(1500, 200);
   changed = true;
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_RED, LOW);
@@ -579,8 +647,8 @@ void printCentered(const char* s, int y, int size) {
 // Title screen: shown at power-on and between games.
 void showIdleScreen() {
   display.clearDisplay();
-  printCentered("DEFUSE", 9, 2);
-  printCentered("Two-player game", 30, 1);
+  printCentered("Decidefer", 9, 2);
+  printCentered("Dont stop talking", 30, 1);
   display.drawFastHLine(0, 43, SCREEN_WIDTH, SSD1306_WHITE);
   printCentered("D  Start setup", 52, 1);
   display.display();
@@ -652,7 +720,10 @@ void handleReady() {
     drawReadyScreen(missing);
     changed = true;
   }
-  if (keypad.getKey() == 'A' && missing == 0) beginLevel();
+  if (keypad.getKey() == 'A') {
+    if (missing == 0) beginLevel();
+    else playFeedbackTone(300, 300);
+  }
 }
 
 void beginLevel() {
@@ -662,6 +733,7 @@ void beginLevel() {
   }
   lastTickMillis = millis() - pausedTickMillis;
   state = GAME_PLAYING;
+  playFeedbackTone(1500, 200);
   playingFrameValid = false;
   changed = true;
 }

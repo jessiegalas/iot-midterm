@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { PROJECT_NAME, PROJECT_TITLE } from './brand';
 
 const roles = [
   { id: 'defuser', title: 'Defuser', player: 'Player 1' },
@@ -317,8 +318,8 @@ export function JoinPlayer({ invite }) {
 
   return (
     <main className="workspace phone-join">
-      <span className="player-number">DEFUSE{role && ' / ' + role.player}</span>
-      <h1>{confirmed ? 'You’re connected' : role ? 'Join as ' + role.title : 'Connect to DEFUSE'}</h1>
+      <span className="player-number">{PROJECT_TITLE}{role && ' / ' + role.player}</span>
+      <h1>{confirmed ? 'You’re connected' : role ? 'Join as ' + role.title : 'Connect to ' + PROJECT_NAME}</h1>
       {confirmed && role ? (
         <p role="status">{confirmed} joined as {role.title}.</p>
       ) : role && error !== joinErrors.occupied && error !== joinErrors.closed ? (

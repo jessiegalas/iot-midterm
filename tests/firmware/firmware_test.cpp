@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
   pinState[BUZZER_PIN] = HIGH;
   setup();
   if (!baseline) expect("setup drives the buzzer pin low", digitalRead(BUZZER_PIN) == LOW);
+  if (!baseline) expect("idle title and tagline fit the OLED", display.clipped == 0 && display.wraps == 0);
   capture("idle");
 
   startGame();
@@ -196,7 +197,10 @@ int main(int argc, char** argv) {
       bool used[NUM_WIRES]{};
       for (int j = 0; j < requiredCount; ++j) {
         const int color = requiredColors[j];
-        matching &= !used[color] && (assignedCards[j] - 1) / 2 == color;
+        const bool mixed = i == 3 && j == 1;
+        const bool elimination = i == 1 || (i == 2 && j == 0);
+        const int expectedCard = mixed ? 11 + color : 1 + color * 2 + elimination;
+        matching &= !used[color] && assignedCards[j] == expectedCard;
         used[color] = true;
       }
     }
@@ -229,6 +233,7 @@ int main(int argc, char** argv) {
       }
     }
     expect("three-level run wins with one shared clock", state == GAME_WON && level == 3 && timeLeft > 0);
+    expect("three codes and five pulls count exactly once", correctDecisions == 8 && totalDecisions == 8);
   }
 
   newLevel(1);
@@ -239,6 +244,19 @@ int main(int argc, char** argv) {
   expect("tick survives unsigned millisecond rollover", timeLeft == 1 && state == GAME_PLAYING);
   step(1000);
   expect("rollover preserves exact timeout", timeLeft == 0 && state == GAME_LOST);
-  if (!baseline) expect("buzzer stays silent through setup, play, and results", toneRequests == 0 && digitalRead(BUZZER_PIN) == LOW);
+  if (!baseline) {
+    expect("timeout plays a loss cue", lastToneFrequency == 200);
+    const unsigned stops = toneStops;
+    resetToIdle();
+    const unsigned idleRequests = toneRequests;
+    step(2000);
+    expect("reset stops the buzzer and idle stays quiet", toneStops > stops && toneRequests == idleRequests);
+    newLevel(1);
+    const unsigned startRequests = toneRequests;
+    step(550);
+    expect("real countdown plays warning beats", toneRequests > startRequests);
+    step(0, '5');
+    expect("real keypad input plays feedback", lastToneFrequency == 1200);
+  }
   return failures != 0;
 }

@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DeviceBridge } from './bridge.js';
 
-const hello = '@HELLO,2,123456abcdef,abcd1234';
-const state = (rev, entry = '', phase = 'playing', boot = 'abcd1234') =>
-  `@STATE,${boot},1,${rev},${phase},1,200,${entry},0,0,0,24,-----:.----:..---:...--,7:10,,`;
+const hello = '@HELLO,3,123456abcdef,abcd1234';
+const state = (rev, entry = '', phase = 'playing', boot = 'abcd1234', seconds = 200, command = '') =>
+  `@STATE,${boot},1,${rev},${phase},1,${seconds},${entry},0,0,0,24,-----:.----:..---:...--,7:10,,${command},0,0,${seconds * 1000}`;
 
 function fixture() {
   let now = 0;
@@ -44,7 +44,7 @@ test('Wi-Fi commands are ordered and USB recovery never replays an uncertain key
   wifi.close();
   assert.equal(bridge.view().status, 'switching');
   assert.equal((await third).code, 'dropped');
-  take(usb, state(2, '01').replace(',200,', ',197,') + secondId);
+  take(usb, state(2, '01', 'playing', 'abcd1234', 197, secondId));
   assert.equal((await second).ok, true);
   assert.equal(bridge.view().transport, 'usb');
   assert.equal(bridge.view().state.entry, '01');

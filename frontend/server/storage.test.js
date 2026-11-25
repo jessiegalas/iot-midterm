@@ -20,7 +20,7 @@ test('scores are deduplicated transactionally across connections and survive reo
     assert.equal(second.saveSimulation(score('two', { attempts: 0 })), 'saved');
     assert.equal(first.saveSimulation(score('esp32:board')), 'invalid');
     assert.equal(first.db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
-    assert.equal(first.db.prepare('PRAGMA user_version').get().user_version, 1);
+    assert.equal(first.db.prepare('PRAGMA user_version').get().user_version, 2);
   } finally {
     second.close();
     first.close();

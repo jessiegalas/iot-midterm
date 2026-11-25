@@ -16,8 +16,9 @@ const identity = 'esp32:' + device + ':' + firstBoot + ':1';
 function state(revision, { phase = 'idle', boot = firstBoot, run = 0, command = '', seconds = 240, entry = '' } = {}) {
   const inProgress = phase === 'playing' || phase === 'won' || phase === 'lost';
   return ['@STATE', boot, run, revision, phase, phase === 'won' ? 3 : 1, seconds, entry, 0, 0,
-    phase === 'won' ? 1 : 0, 0, inProgress ? '-----:.----:..---:...--' : '', inProgress ? '2' : '',
-    phase === 'lost' ? 'WIRE' : '', command].join(',');
+    phase === 'won' ? 1 : 0, 0, inProgress ? '-----:.----:..---:...--' : '', phase === 'won' ? '1:13' : inProgress ? '2' : '',
+    phase === 'lost' ? 'WIRE' : '', command, phase === 'won' ? 8 : 0,
+    phase === 'won' ? 8 : Number(phase === 'lost'), seconds * 1000].join(',');
 }
 
 function fixture(store, lobbies = new PlayerLobbies()) {
@@ -31,7 +32,7 @@ function fixture(store, lobbies = new PlayerLobbies()) {
   function connect(kind, boot = firstBoot) {
     const commands = [];
     const link = bridge.attach(kind, line => commands.push(line));
-    link.line('@HELLO,2,' + device + ',' + boot);
+    link.line('@HELLO,3,' + device + ',' + boot);
     return { ...link, commands, take(snapshot) {
       const request = commands.findLast(line => line.startsWith('TAKE,'));
       assert.ok(request, 'A paired board waits for TAKE');
@@ -223,6 +224,7 @@ test('a legacy score and the same board result appear once without assigning an 
       remaining: 120000, attempts: 0, date: 1000 };
     assert.equal(store.importLegacy([legacy]).imported, 1);
     assert.deepEqual(store.list().map(row => row.team), ['Prior Team']);
+    assert.deepEqual(store.history.list(1, 10000).runs.map(row => row.team), ['Prior Team']);
     assert.equal(f.bridge.view().state.players, null);
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM scores').get().n, 2);
   } finally { store.close(); }
@@ -246,4 +248,26 @@ test('RESET waits for its applied snapshot and a missing confirmation expires', 
     assert.equal(f.bridge.view().state.phase, 'idle');
     assert.equal(store.db.prepare('SELECT status FROM hardware_runs').get().status, 'lost');
   } finally { store.close(); }
+});
+
+test('a hardware loss replaces its interrupted run and retains the hint and decision counts', t => {
+  const store = new ScoreStore(':memory:');
+  t.after(() => store.close());
+  const f = fixture(store);
+  const cable = f.connect('usb');
+  cable.take(state(1, { phase: 'playing', run: 1, seconds: 205 }));
+  assert.equal(store.history.unlockHint(identity, { level: 1, card: 2, tier: 1 }, 10001).length, 1);
+  cable.close();
+  f.advance(8500);
+  assert.equal(store.history.get(identity, 18500).status, 'interrupted');
+  f.connect('usb').take(state(2, { phase: 'lost', run: 1, seconds: 201 }));
+  const run = store.history.get(identity, 18500);
+  assert.equal(f.bridge.view().scoreStatus, 'saved');
+  assert.equal(run.status, 'lost');
+  assert.equal(run.hintsUsed, 1);
+  assert.equal(run.decisions, 1);
+  assert.equal(run.accuracy, 0);
+  assert.equal(run.loss, 'WIRE');
+  assert.equal(run.score, 0);
+  assert.equal(store.history.list(1, 18500).runs.length, 1);
 });

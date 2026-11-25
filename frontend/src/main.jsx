@@ -1,11 +1,12 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { CircleHelp, CircuitBoard, Crosshair, Play, Radio, ShieldCheck, Volume2, VolumeX, X } from 'lucide-react';
+import { CircleHelp, Crosshair, Play, Volume2, VolumeX, X } from 'lucide-react';
+import { PROJECT_NAME, PROJECT_TAGLINE, PROJECT_TITLE } from './brand';
 import { MORSE, COLORS, DURATION, initialGame, gameReducer, clock, makeId } from './game';
 import { Manual } from './manual';
 import { cardNumber } from './expert-manual';
-import { saveMessages, useServerScores } from './scores';
-import { LegacyScores } from './legacy-scores';
+import { saveMessages, useRunRecorder, useRunSummary } from './scores';
+import { Leaderboard, RunResult } from './run-results';
 import { useSoundtrack } from './use-soundtrack';
 import { JoinPlayer, PlayerLobby } from './player-lobby';
 import '@fontsource/dm-sans/latin-400.css';
@@ -45,11 +46,12 @@ function App() {
   const [testRun, dispatchTest] = useReducer(gameReducer, undefined, initialGame);
   const [testLobby, setTestLobby] = useState(null);
   const [startingRealGame, setStartingRealGame] = useState(false);
-  const { scores, loading: scoresLoading, storageError, states: scoreStates } = useServerScores(mission);
+  const { checkpoint, hints, reveal, states: scoreStates } = useRunRecorder(mission);
   const [modal, setModal] = useState(null);
   const [link, setLink] = useState(offlineLink);
   const [commandError, setCommandError] = useState('');
   const [leavingFailure, setLeavingFailure] = useState(false);
+  const [lastRunId, setLastRunId] = useState(null);
   const connectionEpoch = useRef(0);
   const sendQueue = useRef(Promise.resolve());
   const practice = Boolean(testLobby);
@@ -62,7 +64,8 @@ function App() {
   const failed = game.phase === 'lost';
   const result = game.phase === 'won' || game.phase === 'lost';
   const active = practice || playing || game.phase === 'ready' || game.phase === 'cleared';
-  const ranked = tab === 'leaderboard' ? scores : [];
+  const saveState = device ? link.scoreStatus : scoreStates[game.id];
+  const runResult = useRunSummary(result && !practice ? game.id : null, saveState);
   const soundtrack = useSoundtrack({
     active: playing && (!device || (link.status === 'connected' && link.state?.phase === 'playing')),
     practice,
@@ -138,9 +141,11 @@ function App() {
     setCommandError('');
   }
   async function restart() {
+    setLastRunId(game.id);
     if (device) {
       if (!await sendCmd('RESET')) return;
     } else {
+      void checkpoint(gameReducer(game, { type: 'ABORT', now: performance.now() }));
       dispatch({ type: 'RESET' });
     }
     setModal('lobby');
@@ -215,6 +220,8 @@ function App() {
   async function returnAfterFailure() {
     if (leavingFailure) return;
     setLeavingFailure(true);
+    setLastRunId(game.id);
+    if (!device) void checkpoint(game);
     if (device && (controlsBlocked || !await sendCmd('RESET', { immediate: true }))) {
       rememberDeviceMode(false);
       dispatch({ type: 'HW_DETACH' });
@@ -249,8 +256,12 @@ function App() {
       <a className="skip-link" href="#main-content">Skip to content</a>
       {!liveConsole && <header className="site-header">
         <div className="site-header-inner">
-          <button className="wordmark" onClick={() => openTab('leaderboard')} aria-label="DEFUSE home">
-            <Crosshair size={22} aria-hidden="true" /> DEFUSE
+          <button className="wordmark" onClick={() => openTab('leaderboard')} aria-label={PROJECT_TITLE + ' home'}>
+            <Crosshair size={22} aria-hidden="true" />
+            <span className="wordmark-copy">
+              <span>{PROJECT_NAME}</span>
+              <span className="wordmark-tagline">{PROJECT_TAGLINE}</span>
+            </span>
           </button>
           <nav className="navigation" aria-label="Main navigation">
             {pages.map(({ id, label }) => (
@@ -295,7 +306,7 @@ function App() {
                   startingReal={startingRealGame} realGameBlocked={realGameBlocked}
                   onClues={playing && !device && game.round.cards.length ? () => setModal('confirm-clues') : undefined} />
               ) : (
-                <MissionSummary game={game} controlsBlocked={controlsBlocked} saveState={device ? link.scoreStatus ?? 'pending' : scoreStates[game.id]}
+                <MissionSummary game={game} controlsBlocked={controlsBlocked} saveState={saveState}
                   onAction={missionAction} onAbort={() => setModal('reset')} onRanking={() => openTab('leaderboard')} />
               )}
               <CodeModule round={game.phase === 'ready' ? null : game.round}
@@ -306,13 +317,13 @@ function App() {
                   dispatch({ type: game.phase === 'ready' ? 'RECONNECT' : 'WIRE', index, now: performance.now() });
                 }} />
             </div>
+            {!practice && result && <RunResult run={runResult} />}
             {!practice && !playing && !failed && <SessionDetails game={game} />}
           </>
         )}
-        {tab === 'manual' && <Manual />}
+        {tab === 'manual' && <Manual game={game} hints={practice ? [] : hints} onReveal={reveal} />}
         {tab === 'leaderboard' && (
-          <Leaderboard ranked={ranked} currentId={game.id}
-            storageError={storageError} loading={scoresLoading} active={active} onPlay={() => setModal('lobby')} />
+          <Leaderboard currentId={game.id ?? lastRunId} active={active} onPlay={() => setModal('lobby')} />
         )}
       </main>
 
@@ -322,6 +333,8 @@ function App() {
           {modal === 'failure' && (
             <>
               <p>{game.message}</p>
+              <RunResult run={runResult} />
+              <p role="status">{saveMessages[saveState ?? 'saving']}</p>
               {controlsBlocked && <p>The console will detach from the offline ESP32 when you leave.</p>}
               {commandError && <p role="status">{commandError}</p>}
               <div className="dialog-actions">
@@ -347,7 +360,7 @@ function App() {
           )}
           {modal === 'reset' && (
             <>
-              <p>This run will be discarded. Completed scores stay on the leaderboard.</p>
+              <p>Restarting ends this run. Its progress and score will appear on the leaderboard.</p>
               <div className="dialog-actions">
                 <button className="button button-quiet" onClick={() => setModal(null)}>Keep playing</button>
                 <button className="button button-primary" onClick={restart} disabled={controlsBlocked}>Restart</button>
@@ -384,7 +397,7 @@ function MissionSummary({ game, controlsBlocked, saveState, onAction, onAbort, o
     won: 'Mission complete', lost: 'Mission failed',
   }[phase];
   const message = phase === 'won'
-    ? `${game.attempts} incorrect codes. ${saveMessages[saveState ?? 'saving']}`
+    ? saveMessages[saveState ?? 'saving']
     : game.message || (phase === 'idle' ? 'Decode the clues with your Expert and clear three levels on one clock.' : '');
   const disabled = controlsBlocked || phase === 'cleared' || (phase === 'ready' && round.pulled.some(Boolean));
 
@@ -400,7 +413,7 @@ function MissionSummary({ game, controlsBlocked, saveState, onAction, onAbort, o
           <button className={'button ' + (strongAction ? 'button-primary' : 'button-quiet')} onClick={onAction} disabled={disabled}>
             {strongAction && <Play size={16} aria-hidden="true" />}{label}
           </button>
-          {device && phase === 'ready' && <button className="button button-quiet" onClick={onAbort} disabled={controlsBlocked}>Abort</button>}
+          {phase === 'ready' && <button className="button button-quiet" onClick={onAbort} disabled={controlsBlocked}>Abort</button>}
           {phase === 'won' && <button className="button button-quiet" onClick={onRanking}>See ranking</button>}
         </div>
         {message && <p className="mission-message" role="status">{message}</p>}
@@ -591,66 +604,6 @@ function SessionDetails({ game }) {
         </ol>
       )}
     </details>
-  );
-}
-
-function Leaderboard({ ranked, currentId, storageError, loading, active, onPlay }) {
-  return (
-    <section className="leaderboard" aria-label="Saved scores">
-      <div className="leaderboard-heading">
-        <p>Most time remaining ranks first. Fewer incorrect codes break ties.</p>
-        {!active && <button className="button button-primary" onClick={onPlay}>Connect Players</button>}
-      </div>
-      {storageError && <p className="notice" role="status">The score database could not be reached. Showing the last available scores.</p>}
-      <div className="rankings-layout">
-        <section className="podium-panel" aria-labelledby="podium-title">
-          <h2 id="podium-title">Top finishers</h2>
-          {ranked.length === 0 && !storageError && <p className="rankings-note" role="status">{loading ? 'Loading scores…' : 'Clear all three levels to earn a podium spot.'}</p>}
-          <ol className="podium" aria-label="Top three ranks" role="list">
-            {[ShieldCheck, CircuitBoard, Radio].map((Icon, index) => {
-              const score = ranked[index];
-              const rank = index + 1;
-              return <li key={rank} className="podium-place" data-rank={rank}>
-                <span className="sr-only">Rank {rank}</span>
-                <span className="podium-icon"><Icon aria-hidden="true" size={30} strokeWidth={1.6} /></span>
-                <div className="podium-details">
-                  <strong>{score ? score.team : 'Open spot'}</strong>
-                  {score && <>
-                    <p>{score.defuser} + {score.expert}</p>
-                    <p><span className="score-time">{clock(score.remaining)}</span> left</p>
-                    <p>{score.attempts} {score.attempts === 1 ? 'error' : 'errors'} · {new Date(score.date).toLocaleDateString()}</p>
-                    {score.id === currentId && <span className="current-score">Your run</span>}
-                  </>}
-                </div>
-                <div className="podium-step" aria-hidden="true">{rank}</div>
-              </li>;
-            })}
-          </ol>
-        </section>
-        <section className="runners-panel" aria-labelledby="runners-title">
-          <h2 id="runners-title">Runners-up</h2>
-          {ranked.length > 3 ? (
-            <ol className="runner-list" start={4} aria-label="Ranks four and lower" role="list" tabIndex={0}>
-              {ranked.slice(3).map((score, index) => <li key={score.id}>
-                <span className="runner-rank">{index + 4}</span>
-                <div className="runner-team">
-                  <strong>{score.team}</strong>
-                  <span>{score.defuser} + {score.expert}</span>
-                  <span>{new Date(score.date).toLocaleDateString()}</span>
-                  {score.id === currentId && <span className="current-score">Your run</span>}
-                </div>
-                <div className="runner-score">
-                  <span className="score-time">{clock(score.remaining)}<span className="sr-only"> left</span></span>
-                  <span>{score.attempts} {score.attempts === 1 ? 'error' : 'errors'}</span>
-                </div>
-              </li>)}
-            </ol>
-          ) : <p className="rankings-note">Ranks 4 and below appear here.</p>}
-        </section>
-      </div>
-      <p className="local-note">Scores are saved on the host laptop.</p>
-      <LegacyScores />
-    </section>
   );
 }
 

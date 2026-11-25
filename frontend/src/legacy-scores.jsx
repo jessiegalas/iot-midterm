@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { PROJECT_NAME } from './brand';
 import { STORAGE_KEY } from './game';
 
 const MAX_BYTES = 256 * 1024;
@@ -50,7 +51,7 @@ export function LegacyScores() {
     const url = URL.createObjectURL(file);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'defuse-legacy-scores.json';
+    link.download = 'decidefer-legacy-scores.json';
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 500);
   }
@@ -72,7 +73,7 @@ export function LegacyScores() {
       } catch { throw new Error('invalid file'); }
       setResult(await importScores(rows, AbortSignal.timeout(5000)));
     } catch (error) {
-      setError(error.message === 'invalid file' ? 'Choose a DEFUSE score export or a JSON array under 256 KB.' :
+      setError(error.message === 'invalid file' ? 'Choose a ' + PROJECT_NAME + ' score export or a JSON array under 256 KB.' :
         'Scores could not be imported. The file is still available to retry.');
     } finally {
       setBusy(false);

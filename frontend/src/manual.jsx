@@ -1,43 +1,86 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { COLORS, MORSE, WIRES_PER_LEVEL } from './game';
-import { cardNumber, PRACTICE_CARD, RIDDLE_CARDS, tagStatement } from './expert-manual';
+import { cardNumber, HINT_COSTS, PRACTICE_CARD, RIDDLE_CARDS } from './expert-manual';
 
 function WireKey() {
   return (
-    <dl className="manual-wire-key" aria-label="Wire number to colour">
-      {COLORS.map((colour, index) => (
-        <div key={colour}><dt>{index + 1}</dt><dd>{colour}</dd></div>
+    <dl className="manual-wire-key" aria-label="Wire number to color">
+      {COLORS.map((color, index) => (
+        <div key={color}><dt>{index + 1}</dt><dd>{color}</dd></div>
       ))}
     </dl>
   );
 }
 
-function TagPuzzle({ card }) {
+function WireCandidates({ numbered }) {
+  const [crossedOut, setCrossedOut] = useState([]);
   return (
-    <>
-      <p className="tag-target"><strong>Exactly {card.trueCount} {card.trueCount === 1 ? 'tag is' : 'tags are'} true.</strong></p>
-      <dl className="tag-statements">
-        {card.tags.map(tag => <div key={tag.wire}><dt>{tag.wire}</dt><dd>{tagStatement(tag)}</dd></div>)}
-      </dl>
-      <fieldset className="tag-tally">
-        <legend>True tags for each candidate</legend>
-        {COLORS.map(colour => (
-          <label key={colour}>{colour}<input type="number" min="0" max="5" inputMode="numeric" /></label>
-        ))}
-      </fieldset>
-    </>
+    <fieldset className="wire-candidates">
+      <legend>{numbered ? 'Wire numbers' : 'Possible wires'}</legend>
+      {COLORS.map((color, index) => (
+        <button key={color} type="button" aria-pressed={crossedOut.includes(color)}
+          onClick={() => setCrossedOut(previous => previous.includes(color)
+            ? previous.filter(item => item !== color) : [...previous, color])}>
+          {numbered && <span>{index + 1}</span>}{color}
+        </button>
+      ))}
+    </fieldset>
   );
 }
 
-export function Manual() {
+function CardHints({ card, revealed, canReveal, onReveal }) {
+  const [freeHints, setFreeHints] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const free = card.id === PRACTICE_CARD.id;
+  const count = free ? freeHints : revealed.length;
+
+  async function reveal() {
+    if (free) {
+      setFreeHints(count + 1);
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await onReveal(card.id, count + 1);
+    } catch {
+      setError('The hint could not open. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!canReveal && !free && !count) return null;
+
+  return (
+    <div className="card-hints">
+      {(free ? card.hints.slice(0, count) : revealed.map(hint => hint.text)).map((text, index) => (
+        <details key={index} open>
+          <summary>Hint {index + 1}</summary>
+          <p>{text}</p>
+        </details>
+      ))}
+      {(free || canReveal) && count < card.hints.length && (
+        <button className="button button-quiet" type="button" onClick={reveal} disabled={busy}>
+          {busy ? 'Opening hint…' : 'Show hint ' + (count + 1) + (free ? ' · Free' : ' · −' + HINT_COSTS[count] + ' points')}
+        </button>
+      )}
+      {error && <p role="status">{error}</p>}
+    </div>
+  );
+}
+
+export function Manual({ game, hints, onReveal }) {
   const cards = [...RIDDLE_CARDS, PRACTICE_CARD];
+  const assigned = game.phase === 'playing' ? game.round.cards : [];
   return (
     <div className="manual">
       <section className="reference" aria-labelledby="roles-title">
         <h2 id="roles-title">During each level</h2>
         <ol className="help-steps">
           <li><strong>Code.</strong> The Defuser reads groups 1–4. Match each group in the chart, keep leading zeros, and read back all four digits.</li>
-          <li><strong>Wires.</strong> The Defuser reads the card numbers. Solve one card at a time and confirm its wire colour together before pulling.</li>
+          <li><strong>Wires.</strong> The Defuser reads the card numbers. Solve one card at a time and tell the Defuser which color to pull.</li>
         </ol>
         <p>Do both tasks in either order. The Defuser sees the device. The Expert sees this manual.</p>
         <details className="session-details">
@@ -58,30 +101,33 @@ export function Manual() {
       </section>
       <section className="reference" aria-labelledby="riddles-title">
         <h2 id="riddles-title">Wire cards</h2>
-        <WireKey />
         <nav className="card-index" aria-label="Find a wire card">
           {cards.map(card => {
             const number = cardNumber(card.id);
+            const test = card.id === PRACTICE_CARD.id;
             return <a key={number} href={'#expert-card-' + number}
-              aria-label={number === 'P' ? 'Go to test card P' : 'Go to card ' + number}
+              aria-label={test ? 'Go to test card P' : 'Go to card ' + number}
               onClick={event => {
                 const target = document.getElementById(event.currentTarget.hash.slice(1));
                 if (target) target.open = true;
-              }}>{number}</a>;
+              }}>{test ? 'Test card P' : number}</a>;
           })}
         </nav>
-        <p>For tag cards, assume each colour is correct in turn. Count its true tags and use the colour that matches the card’s count.</p>
         <div className="riddle-grid">
           {cards.map(card => {
             const number = cardNumber(card.id);
             return (
               <details key={number} id={'expert-card-' + number}>
-                <summary>{number === 'P' ? 'Card P · Test run' : 'Card ' + number}</summary>
-                {card.tags ? <TagPuzzle card={card} /> : <>
-                  <p>{card.prompt}</p>
-                  {card.hint && <p><strong>Hint.</strong> {card.hint}</p>}
-                  <WireKey />
-                </>}
+                <summary>{number === 'P' ? 'Test card P' : 'Card ' + number}</summary>
+                {card.clues ? <>
+                  <p>All clues apply. Cross out colors until one is left. Tell the Defuser that color.</p>
+                  <ul className="wire-clues">{card.clues.map(clue => <li key={clue}>{clue}</li>)}</ul>
+                  <WireCandidates key={(game.id ?? 'practice') + ':' + game.level} numbered={card.kind === 'mixed'} />
+                </> : <><p>{card.prompt}</p><WireKey /></>}
+                <CardHints key={(game.id ?? 'practice') + ':' + game.level}
+                  card={card} canReveal={assigned.includes(card.id)}
+                  revealed={hints.filter(hint => hint.level === game.level && hint.card === card.id)}
+                  onReveal={onReveal} />
               </details>
             );
           })}
