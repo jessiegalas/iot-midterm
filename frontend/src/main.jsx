@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { CircleHelp, CircuitBoard, Crosshair, Play, Radio, ShieldCheck, Volume2, VolumeX, X } from 'lucide-react';
 import { MORSE, COLORS, DURATION, initialGame, gameReducer, clock, makeId } from './game';
 import { Manual } from './manual';
+import { cardNumber } from './expert-manual';
 import { saveMessages, useServerScores } from './scores';
 import { LegacyScores } from './legacy-scores';
 import { useSoundtrack } from './use-soundtrack';
@@ -40,23 +41,31 @@ const commandMessages = {
 
 function App() {
   const [tab, setTab] = useState(() => restoreDeviceMode() ? 'console' : 'leaderboard');
-  const [game, dispatch] = useReducer(gameReducer, undefined, () => ({ ...initialGame(), device: restoreDeviceMode() }));
-  const { scores, loading: scoresLoading, storageError, states: scoreStates } = useServerScores(game);
+  const [mission, dispatchMission] = useReducer(gameReducer, undefined, () => ({ ...initialGame(), device: restoreDeviceMode() }));
+  const [testRun, dispatchTest] = useReducer(gameReducer, undefined, initialGame);
+  const [testLobby, setTestLobby] = useState(null);
+  const [startingRealGame, setStartingRealGame] = useState(false);
+  const { scores, loading: scoresLoading, storageError, states: scoreStates } = useServerScores(mission);
   const [modal, setModal] = useState(null);
   const [link, setLink] = useState(offlineLink);
   const [commandError, setCommandError] = useState('');
   const [leavingFailure, setLeavingFailure] = useState(false);
   const connectionEpoch = useRef(0);
   const sendQueue = useRef(Promise.resolve());
+  const practice = Boolean(testLobby);
+  const game = practice ? testRun : mission;
+  const dispatch = practice ? dispatchTest : dispatchMission;
   const device = game.device;
   const controlsBlocked = device && link.status !== 'connected';
+  const realGameBlocked = mission.device && link.status !== 'connected';
   const playing = game.phase === 'playing';
   const failed = game.phase === 'lost';
   const result = game.phase === 'won' || game.phase === 'lost';
-  const active = playing || game.phase === 'ready' || game.phase === 'cleared';
+  const active = practice || playing || game.phase === 'ready' || game.phase === 'cleared';
   const ranked = tab === 'leaderboard' ? scores : [];
   const soundtrack = useSoundtrack({
     active: playing && (!device || (link.status === 'connected' && link.state?.phase === 'playing')),
+    practice,
     runId: game.id,
     device,
     deadline: game.deadline,
@@ -73,10 +82,10 @@ function App() {
   }, [failed]);
 
   useEffect(() => {
-    if (!playing || controlsBlocked) return;
+    if (!playing || practice || controlsBlocked) return;
     const timer = setInterval(() => dispatch({ type: 'TICK', now: performance.now() }), 100);
     return () => clearInterval(timer);
-  }, [playing, controlsBlocked]);
+  }, [playing, practice, controlsBlocked, dispatch]);
   useEffect(() => {
     const events = new EventSource('/api/events');
     let previousLink;
@@ -94,10 +103,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (device && link.state) {
-      dispatch({ type: 'HW_SNAPSHOT', snapshot: link.state, now: performance.now() });
+    if (mission.device && link.state) {
+      dispatchMission({ type: 'HW_SNAPSHOT', snapshot: link.state, now: performance.now() });
     }
-  }, [device, link.state]);
+  }, [mission.device, link.state]);
 
   async function sendCmd(command, { players, immediate = false } = {}) {
     const epoch = connectionEpoch.current;
@@ -142,7 +151,7 @@ function App() {
       try {
         const response = await fetch('/api/lobbies/' + lobbyId + '/start', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode: device ? 'hardware' : 'simulation', connection: link.connection }),
+          body: JSON.stringify({ mode: mission.device ? 'hardware' : 'simulation', connection: link.connection }),
           signal: AbortSignal.timeout(8000),
         });
         outcome = await response.json();
@@ -151,15 +160,40 @@ function App() {
       }
       if (!outcome.ok) {
         setCommandError(commandMessages[outcome.code] ?? 'The lobby could not start. Check both names and try again.');
-        return;
+        return outcome.code ?? 'unavailable';
       }
-    } else if (device && !await sendCmd('START', { players })) return;
+    } else if (mission.device && !await sendCmd('START', { players })) return 'unavailable';
     const names = outcome?.players ?? players;
-    if (!device) dispatch({ type: 'START', players: { ...names, team: names.defuser + ' + ' + names.expert },
+    if (!mission.device) dispatchMission({ type: 'START', players: { ...names, team: names.defuser + ' + ' + names.expert },
       now: performance.now(), id: outcome?.runId ?? makeId() });
     setCommandError('');
     setTab('console');
     setModal(null);
+    return null;
+  }
+  function startTestRun(players, lobbyId) {
+    soundtrack.enableForTest();
+    setCommandError('');
+    setTestLobby({ players, id: lobbyId });
+    dispatchTest({ type: 'START_PRACTICE' });
+    setModal(null);
+    openTab('console');
+  }
+  async function startRealAfterTest() {
+    if (startingRealGame || realGameBlocked) return;
+    setStartingRealGame(true);
+    try {
+      const error = await start(testLobby.players, testLobby.id);
+      if (error && !['closed', 'expired'].includes(error)) return;
+      dispatchTest({ type: 'RESET' });
+      setTestLobby(null);
+      if (error) {
+        setCommandError('The lobby expired. Reconnect both players to start the real game.');
+        setModal('lobby');
+      }
+    } finally {
+      setStartingRealGame(false);
+    }
   }
   function missionAction() {
     if (failed) {
@@ -192,7 +226,7 @@ function App() {
     openTab('leaderboard');
   }
   const title = pages.find(page => page.id === tab).label;
-  const liveConsole = (playing || failed) && tab === 'console';
+  const liveConsole = (playing || failed || practice) && tab === 'console';
   const clueModal = modal === 'confirm-clues' || modal === 'clues';
   const modalTitle = {
     lobby: 'Connect players', reset: 'Restart mission?', help: 'How to play',
@@ -248,27 +282,31 @@ function App() {
         {error && <div className="notice"><p role="status">{error}</p>{commandError && <button className="icon-button" onClick={() => setCommandError('')} aria-label="Dismiss message"><X size={18} aria-hidden="true" /></button>}</div>}
         {active && tab !== 'console' && (
           <button className="return-console" onClick={() => openTab('console')}>
-            {playing ? 'Return to active mission' : 'Return to paused mission'} <strong>{formatRemaining(game.remaining)}</strong>
+            {practice ? 'Return to test run' : playing ? 'Return to active mission' : 'Return to paused mission'}
+            {!practice && <strong>{formatRemaining(game.remaining)}</strong>}
           </button>
         )}
         {tab === 'console' && (
           <>
-            <div className="console-board" data-playing={(playing || failed) || undefined}>
-              <CodeModule round={game.phase === 'ready' ? null : game.round}
-                disabled={!playing || controlsBlocked || !!game.round?.solved} onPress={press} />
-              {playing || failed ? (
-                <LiveCountdown remaining={game.remaining} message={game.message} failed={failed} soundtrack={soundtrack} />
+            <div className="console-board" data-playing={(playing || failed || practice) || undefined}>
+              {playing || failed || practice ? (
+                <LiveCountdown remaining={game.remaining} message={game.message} failed={failed} soundtrack={soundtrack}
+                  practice={practice} practiceDone={practice && result} onStartReal={startRealAfterTest}
+                  startingReal={startingRealGame} realGameBlocked={realGameBlocked}
+                  onClues={playing && !device && game.round.cards.length ? () => setModal('confirm-clues') : undefined} />
               ) : (
                 <MissionSummary game={game} controlsBlocked={controlsBlocked} saveState={device ? link.scoreStatus ?? 'pending' : scoreStates[game.id]}
                   onAction={missionAction} onAbort={() => setModal('reset')} onRanking={() => openTab('leaderboard')} />
               )}
-              <WireModule round={game.round} device={device} phase={game.phase} level={game.level}
+              <CodeModule round={game.phase === 'ready' ? null : game.round}
+                disabled={!playing || controlsBlocked || !!game.round?.solved} onPress={press} />
+              <WireModule round={game.round} device={device} phase={game.phase} level={game.level} practice={practice}
                 controlsBlocked={controlsBlocked} onRestart={missionAction} onManual={() => openTab('manual')}
-                onClues={() => setModal('confirm-clues')} onWire={index => {
+                onWire={index => {
                   dispatch({ type: game.phase === 'ready' ? 'RECONNECT' : 'WIRE', index, now: performance.now() });
                 }} />
             </div>
-            {!playing && !failed && <SessionDetails game={game} />}
+            {!practice && !playing && !failed && <SessionDetails game={game} />}
           </>
         )}
         {tab === 'manual' && <Manual />}
@@ -305,7 +343,7 @@ function App() {
           )}
           {modal === 'clues' && <DefuserClues round={game.round} />}
           {modal === 'lobby' && (
-            <PlayerLobby device={device} controlsBlocked={controlsBlocked} onStart={start} commandError={commandError} />
+            <PlayerLobby device={device} controlsBlocked={controlsBlocked} onStart={start} onTestRun={startTestRun} commandError={commandError} />
           )}
           {modal === 'reset' && (
             <>
@@ -381,28 +419,40 @@ function SoundToggle({ soundtrack }) {
   );
 }
 
-function LiveCountdown({ remaining, message, failed, soundtrack }) {
-  const urgent = failed || remaining < 31000;
+function LiveCountdown({ remaining, message, failed, soundtrack, practice, practiceDone, onStartReal, startingReal, realGameBlocked, onClues }) {
+  const urgent = !practice && (failed || remaining < 31000);
+  const status = practice ? (practiceDone ? 'Test run complete' : 'Test run')
+    : failed ? 'Mission failed' : urgent ? 'Time running low' : 'Device armed';
   return (
-    <section className="live-countdown" aria-label="Mission countdown" data-urgent={urgent || undefined}>
+    <section className="live-countdown" aria-label="Mission countdown" data-urgent={urgent || undefined} data-practice={practice || undefined}>
       <div className="live-countdown-header">
-        <p className="run-state" aria-live="polite"><span className="status-dot" aria-hidden="true" />{failed ? 'Mission failed' : urgent ? 'Time running low' : 'Device armed'}</p>
+        <p className="run-state" aria-live="polite"><span className="status-dot" aria-hidden="true" />{status}</p>
         <SoundToggle soundtrack={soundtrack} />
       </div>
-      <div className="countdown-ring" style={{ '--remaining': timePercentage(remaining) }}>
-        <ClockReadout remaining={remaining} showFractions />
-        {!failed && remaining > 0 && <span className="countdown-tail" style={{ '--tail-angle': `${timeRatio(remaining) * 360}deg` }} aria-hidden="true"><span /></span>}
+      <div className="countdown-ring" style={{ '--remaining': practice ? '100%' : timePercentage(remaining) }}>
+        <ClockReadout remaining={practice ? 0 : remaining} showFractions={!practice} label={practice ? 'Timer off' : undefined} />
+        {!practice && !failed && remaining > 0 && <span className="countdown-tail" style={{ '--tail-angle': `${timeRatio(remaining) * 360}deg` }} aria-hidden="true"><span /></span>}
       </div>
-      <p className="mission-message" role="status">{message}</p>
+      <div className="countdown-footer">
+        {practiceDone ? <>
+          <p className="mission-message">{realGameBlocked ? 'Reconnect the ESP32 to continue.' : 'Next is the four-minute mission.'}</p>
+          <button type="button" className="button button-primary" onClick={onStartReal} disabled={startingReal || realGameBlocked}>
+            <Play size={16} aria-hidden="true" />{startingReal ? 'Starting…' : 'Start real game'}
+          </button>
+        </> : <>
+          <p className="mission-message" role="status">{message}</p>
+          {onClues && <button className="button button-quiet" onClick={onClues}>Show Defuser clues</button>}
+        </>}
+      </div>
     </section>
   );
 }
 
-function ClockReadout({ remaining, showFractions, roundUp }) {
+function ClockReadout({ remaining, showFractions, roundUp, label = 'Time remaining' }) {
   const fraction = String(Math.floor(remaining % 1000 / 10)).padStart(2, '0');
   return (
     <div className="mission-clock">
-      <span id="clock-label">Time remaining</span>
+      <span id="clock-label">{label}</span>
       <span className="clock-value" role="timer" aria-labelledby="clock-label">
         {roundUp ? formatRemaining(remaining) : clock(remaining)}{showFractions && <span className="clock-fraction" aria-hidden="true">.{fraction}</span>}
       </span>
@@ -446,7 +496,7 @@ function CodeModule({ round, disabled, onPress }) {
   }
   return (
     <section className="puzzle code-module" aria-labelledby="code-title">
-      <h2 id="code-title" className="sr-only">Keypad</h2>
+      <h2 id="code-title" className="module-title">Keypad</h2>
       <div className="code-entry">
         <span>{round?.solved ? 'Code verified' : 'Entered code'}</span>
         <output aria-label="Entered code">{round?.entry || '—'}</output>
@@ -464,21 +514,18 @@ function CodeModule({ round, disabled, onPress }) {
   );
 }
 
-function WireModule({ round, device, phase, level, onWire, controlsBlocked, onRestart, onManual, onClues }) {
+function WireModule({ round, device, phase, level, practice, onWire, controlsBlocked, onRestart, onManual }) {
   const canPull = phase === 'playing';
   const reconnect = phase === 'ready';
   const disconnected = round?.pulled.filter(Boolean).length || 0;
   return (
     <section className="puzzle wire-module" aria-labelledby="wire-title">
-      {canPull || phase === 'lost' ? <>
-        <MissionFacts level={level} strikes={round?.wrong || 0} />
-        <h2 id="wire-title" className="live-wires-title">Wires</h2>
-      </> : <h2 id="wire-title">Wires</h2>}
+      <div className="wire-heading">
+        <h2 id="wire-title" className="module-title">Wires</h2>
+        {!practice && (canPull || phase === 'lost') && <MissionFacts level={level} strikes={round?.wrong || 0} />}
+      </div>
       {reconnect && <p className="module-hint">Reconnect every wire before starting the next level.</p>}
-      {canPull && !device && round.cards.length > 0 && (
-        <button className="button button-quiet private-clue-button" onClick={onClues}>Show Defuser clues</button>
-      )}
-      <div className="wire-summary"><span>Wire bank</span><span>{disconnected} / {COLORS.length} disconnected</span></div>
+      <div className="wire-summary">{disconnected} / {COLORS.length} disconnected</div>
       <ul className="wire-bank">
         {COLORS.map((color, index) => {
           const name = color.toLowerCase();
@@ -505,7 +552,7 @@ function WireModule({ round, device, phase, level, onWire, controlsBlocked, onRe
       {device && <p className="input-help">Wire status comes from the physical ESP32.</p>}
       {canPull && <div className="wire-actions">
         <button className="button button-quiet" onClick={onManual}>Expert manual</button>
-        <button className="button button-quiet" onClick={onRestart} disabled={controlsBlocked}>Restart</button>
+        {!practice && <button className="button button-quiet" onClick={onRestart} disabled={controlsBlocked}>Restart</button>}
       </div>}
       {phase === 'lost' && <div className="wire-actions">
         <button className="button button-quiet" onClick={onRestart}>Return to leaderboard</button>
@@ -520,12 +567,13 @@ function DefuserClues({ round }) {
       {[...round.code].map((digit, index) => {
         const group = MORSE[Number(digit)];
         return <li key={index}>
-          <span className="sr-only">{[...group].map(mark => mark === '.' ? 'dot' : 'dash').join(' ')}</span>
+          <span className="morse-position" aria-hidden="true">{index + 1}</span>
+          <span className="sr-only">Group {index + 1}. {[...group].map(mark => mark === '.' ? 'dot' : 'dash').join(' ')}</span>
           <code aria-hidden="true">{group}</code>
         </li>;
       })}
     </ol>
-    <p className="wire-clue-numbers">Wire clue numbers <strong>{round.cards.map(card => String(card).padStart(2, '0')).join(', ')}</strong></p>
+    <p className="wire-clue-numbers">Wire cards <strong>{round.cards.map(cardNumber).join(', ')}</strong></p>
   </>;
 }
 

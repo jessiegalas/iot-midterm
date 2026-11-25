@@ -94,13 +94,13 @@ Plug the ESP32 into the PC with a **USB data cable** and run `arduino-cli board 
    npm.cmd start --prefix frontend
    ```
 
-4. Open the **Console ready** URL printed in the terminal. In **Mission control**, look for **Wi-Fi connected / USB ready** for Option 1 or **USB connected** for Option 2. Select **Use ESP32**. Enable sound with the speaker button to hear the soundtrack.
+4. Open the **Console ready** URL printed in the terminal. In **Mission control**, look for **Wi-Fi connected / USB ready** for Option 1 or **USB connected** for Option 2. Select **Use ESP32**. The laptop speaker button controls the soundtrack. The updated ESP32 firmware keeps the buzzer silent.
 
 For your next session, plug in the board, open the project in VS Code, and run `npm.cmd start --prefix frontend`. Rebuild after web changes. Re-upload after firmware changes or updates to `bridge_local.h`.
 
 ## 5. Play a round
 
-Choose **Start game** and scan one QR code per role. The phones join over the PC’s local network with either ESP32 connection option. If the phones cannot reach the PC, enter both names under **Manual entry**. Once both names appear, choose **Start Game**, seat all the wires, and select **Start level 1** or press **A** on the board.
+Choose **Start game** and scan one QR code per role. Each phone collects a player name and confirms the assigned role. If the phones cannot reach the PC, enter both names under **Manual entry**. Once both names appear on the laptop, choose **Start test run** for an untimed browser round or **Start real game** to proceed. For the real game, seat all the wires, then select **Start level 1** or press **A** on the board.
 
 | If you get stuck | What to check |
 |---|---|

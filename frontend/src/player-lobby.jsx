@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Manual } from './manual';
 
 const roles = [
   { id: 'defuser', title: 'Defuser', player: 'Player 1' },
@@ -18,7 +17,7 @@ async function api(path, options) {
   return value;
 }
 
-export function PlayerLobby({ device, controlsBlocked, onStart, commandError }) {
+export function PlayerLobby({ device, controlsBlocked, onStart, onTestRun, commandError }) {
   const [session, setSession] = useState(null);
   const [names, setNames] = useState(emptyNames);
   const [draft, setDraft] = useState(emptyNames);
@@ -33,6 +32,7 @@ export function PlayerLobby({ device, controlsBlocked, onStart, commandError }) 
   const [copy, setCopy] = useState(null);
   const mounted = useRef(false);
   const live = useRef({ id: null, events: null, revision: -1 });
+  const keepLobbyForTest = useRef(false);
   const complete = Boolean(names.defuser && names.expert);
 
   function applyPlayers(lobby) {
@@ -85,6 +85,7 @@ export function PlayerLobby({ device, controlsBlocked, onStart, commandError }) 
           if (!next) {
             events.close();
             setSession(null);
+            setNames(emptyNames);
             setAddress('');
             setNetworkMessage('The invitations expired. Retry QR for new codes or use manual entry.');
             setManual(true);
@@ -121,7 +122,8 @@ export function PlayerLobby({ device, controlsBlocked, onStart, commandError }) 
     void loadLobby(null);
     return () => {
       mounted.current = false;
-      closeLobby(live.current);
+      if (keepLobbyForTest.current) live.current.events?.close();
+      else closeLobby(live.current);
       live.current = { id: null, events: null, revision: -1 };
     };
   }, []);
@@ -163,6 +165,12 @@ export function PlayerLobby({ device, controlsBlocked, onStart, commandError }) 
     }
   }
 
+  function startTestRun() {
+    if (!complete || pending || loading) return;
+    keepLobbyForTest.current = true;
+    onTestRun(names, session?.id);
+  }
+
   async function copyLink(role) {
     try {
       const data = await api('/api/lobbies/' + session.id + '/link/' + role + '?address=' + encodeURIComponent(address), { signal: timeout() });
@@ -178,17 +186,8 @@ export function PlayerLobby({ device, controlsBlocked, onStart, commandError }) 
 
   return (
     <div className="player-lobby">
-      {address && <p className="lobby-intro">Connect both phones to the same local network as the laptop, then scan one QR code per player.</p>}
-      {(session?.networks.length > 1 || (!address && session?.networks.length > 0)) && (
-        <label className="lobby-network">Network for QR codes
-          <select value={address} onChange={event => { setAddress(event.target.value); setCopy(null); }}>
-            <option value="" disabled>Select a network</option>
-            {session.networks.map(network => <option key={network.address} value={network.address}>{network.name} ({network.address})</option>)}
-          </select>
-        </label>
-      )}
-      {address && <p className="lobby-hint">Phone network {address}:{session.joinPort}. Check Windows Firewall and use the same Wi-Fi. Guest networks may isolate devices.</p>}
-      <div className="player-roles">
+      {!complete && address && <p className="lobby-intro">Scan one code per player. Use the same Wi-Fi as the laptop.</p>}
+      <div className="player-roles" data-ready={complete || undefined}>
         {roles.map(({ id, title, player }) => (
           <section className="player-role" key={id} aria-labelledby={id + '-role'}>
             <span className="player-number">{player}</span>
@@ -207,14 +206,13 @@ export function PlayerLobby({ device, controlsBlocked, onStart, commandError }) 
           </section>
         ))}
       </div>
-      {copy && (copy.done ? <p role="status">Join link copied.</p> :
+      {!complete && copy && (copy.done ? <p role="status">Join link copied.</p> :
         <label className="lobby-network">Join link for {roles.find(role => role.id === copy.role)?.title}
           <input readOnly value={copy.url} onFocus={event => event.target.select()} />
         </label>)}
-      {networkMessage && <p className="lobby-feedback" role="status">{networkMessage}</p>}
-      {streamMessage && <p className="lobby-feedback" role="status">{streamMessage}</p>}
-      <button type="button" className="button button-quiet" disabled={loading || pending} onClick={() => loadLobby(session?.id, names)}>Retry QR</button>
-      <details className="lobby-manual" open={manual} onToggle={event => setManual(event.currentTarget.open)}>
+      {!complete && networkMessage && <p className="lobby-feedback" role="status">{networkMessage}</p>}
+      {!complete && streamMessage && <p className="lobby-feedback" role="status">{streamMessage}</p>}
+      {!complete && <details className="lobby-manual" open={manual} onToggle={event => setManual(event.currentTarget.open)}>
         <summary>Manual entry</summary>
         <form onSubmit={saveNames}>
           <div className="lobby-name-fields">
@@ -226,14 +224,36 @@ export function PlayerLobby({ device, controlsBlocked, onStart, commandError }) 
           <button className="button button-quiet" type="submit" disabled={loading || pending || complete}>Save names</button>
           {error && <p className="lobby-feedback" role="alert">{error}</p>}
         </form>
-      </details>
-      <div className="lobby-start">
-        <span role="status">{controlsBlocked ? 'Reconnect the ESP32 to start.' : complete ? 'Both players are ready.' : 'Waiting for both players.'}</span>
-        <button className="button button-primary" type="button" disabled={!complete || pending || loading || controlsBlocked} onClick={start}>
-          {pending ? 'Please wait…' : 'Start Game'}
-        </button>
-      </div>
-      {device && <p className="lobby-hint">After starting, seat the wires and arm the level on the ESP32.</p>}
+      </details>}
+      {!complete && <details className="lobby-network-options">
+        <summary>QR and network settings</summary>
+        <div className="lobby-network-settings">
+          {(session?.networks.length > 1 || (!address && session?.networks.length > 0)) && (
+            <label className="lobby-network">Network for QR codes
+              <select value={address} onChange={event => { setAddress(event.target.value); setCopy(null); }}>
+                <option value="" disabled>Select a network</option>
+                {session.networks.map(network => <option key={network.address} value={network.address}>{network.name} ({network.address})</option>)}
+              </select>
+            </label>
+          )}
+          {address && <p className="lobby-hint">Phone network {address}:{session.joinPort}. Check Windows Firewall and use the same Wi-Fi. Guest networks may isolate devices.</p>}
+          <button type="button" className="button button-quiet" disabled={loading || pending} onClick={() => loadLobby(session?.id, names)}>Retry QR</button>
+        </div>
+      </details>}
+      {complete ? (
+        <div className="lobby-start">
+          <p className="lobby-question" role="status">Want to do a test run?</p>
+          <div className="actions">
+            <button className="button button-primary" type="button" autoFocus disabled={pending || loading} onClick={startTestRun}>Start test run</button>
+            <button className="button button-quiet" type="button" disabled={pending || loading || controlsBlocked} onClick={start}>
+              {pending ? 'Starting…' : 'Start real game'}
+            </button>
+          </div>
+        </div>
+      ) : <p className="lobby-waiting" role="status">Waiting for both players.</p>}
+      {complete && device && <p className="lobby-hint">{controlsBlocked
+        ? 'Reconnect the ESP32 to start the real game.'
+        : 'The test runs here. For the real game, seat the wires and arm the ESP32.'}</p>}
       {commandError && <p className="lobby-feedback" role="alert">{commandError}</p>}
     </div>
   );
@@ -248,27 +268,25 @@ export function JoinPlayer({ invite }) {
   const [role, setRole] = useState(null);
   const [name, setName] = useState('');
   const [confirmed, setConfirmed] = useState('');
-  const [status, setStatus] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  const [manual, setManual] = useState(false);
   const endpoint = '/api/join/' + invite;
 
   useEffect(() => {
+    if (confirmed) return;
     let next;
     const controller = new AbortController();
     async function refresh() {
       try {
         const data = await api(endpoint, { signal: AbortSignal.any([controller.signal, timeout()]) });
         setRole(roles.find(role => role.id === data.role));
-        setStatus(data.status);
         if (data.name) {
           setConfirmed(data.name);
           setError('');
+          return;
         } else if (data.occupied) {
           setError(joinErrors.occupied);
         }
-        if (data.status === 'started') return;
       } catch (error) {
         if (controller.signal.aborted) return;
         setError(joinErrors[error.message] || 'Reconnecting to the lobby. Check the local network.');
@@ -278,7 +296,7 @@ export function JoinPlayer({ invite }) {
     }
     void refresh();
     return () => { controller.abort(); clearTimeout(next); };
-  }, [endpoint]);
+  }, [endpoint, confirmed]);
 
   async function join(event) {
     event.preventDefault();
@@ -290,7 +308,6 @@ export function JoinPlayer({ invite }) {
       const data = await api(endpoint, { method: 'POST', headers: jsonHeaders,
         body: JSON.stringify({ name: value }), signal: timeout() });
       setConfirmed(data.name);
-      setStatus(data.status);
     } catch (error) {
       setError(joinErrors[error.message] || 'Connection failed. Check the local network and try again.');
     } finally {
@@ -301,17 +318,9 @@ export function JoinPlayer({ invite }) {
   return (
     <main className="workspace phone-join">
       <span className="player-number">DEFUSE{role && ' / ' + role.player}</span>
-      <h1>{confirmed ? status === 'started' ? 'Game started' : 'You’re connected' : role ? 'Join as ' + role.title : 'Connect to DEFUSE'}</h1>
+      <h1>{confirmed ? 'You’re connected' : role ? 'Join as ' + role.title : 'Connect to DEFUSE'}</h1>
       {confirmed && role ? (
-        <>
-          <p role="status">{confirmed}, you’re the {role.title}. {status === 'started' ? 'The host has started the game.' :
-            status === 'starting' ? 'The host is starting the game.' : 'Wait for the host to start.'}</p>
-          {role.id === 'expert' && <>
-            <button type="button" className="button button-primary" aria-expanded={manual} aria-controls="phone-manual"
-              onClick={() => setManual(previous => !previous)}>{manual ? 'Hide Expert manual' : 'Open Expert manual'}</button>
-            {manual && <section id="phone-manual" aria-label="Expert manual"><Manual /></section>}
-          </>}
-        </>
+        <p role="status">{confirmed} joined as {role.title}.</p>
       ) : role && error !== joinErrors.occupied && error !== joinErrors.closed ? (
         <form onSubmit={join}>
           <label>Name<input required maxLength={24} name="name" autoComplete="given-name" value={name} onChange={event => setName(event.target.value)} /></label>

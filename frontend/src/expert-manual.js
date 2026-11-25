@@ -1,127 +1,93 @@
-// Puzzle text from Player2_Manual_Expert_5wires.docx.
-export const LOCKS = [
-  "KEYWORD lock.  Write the keyword over and over underneath the note. Each note letter was pushed forward by the number of the keyword letter beneath it. To open it, pull each letter back by that number, wrapping from A back round to Z. Example: CAT with keyword BED becomes DEW (C+1, A+4, T+3).",
-  "MIRROR.  Flip the alphabet end to end: A and Z swap, B and Y swap, C and X swap, and so on up to M and N. Example: CAT becomes XZG. Mirroring twice undoes itself.",
-  "PUSH n.  Every letter moves forward n places, wrapping from Z to A. Example: CAT with PUSH 3 becomes FDW. To undo it, pull every letter back n places.",
-  "MIRROR, then PUSH n.  The note was mirrored first and pushed second. To open it, undo them in the opposite order: pull back n first, then mirror.",
-  "ZIGZAG r.  The note was written in a zigzag, down and up across r rows, then each row was read off left to right, top row first. To open it, rebuild the zigzag. Example with 3 rows: HELLOWORLD gives a top row HOL, a middle row ELWRD and a bottom row LO, so the locked note reads HOLELWRDLO.",
-  "Opened notes come out as plain English with no spaces. Split them into words yourself, and read them carefully."
-];
+export const PRACTICE_CARD = {
+  id: 'P',
+  prompt: 'Share 18 tokens equally among 6 teams. How many tokens does each team get? Use that number as your wire number.',
+  wireNumber: 3,
+};
 
 export const RIDDLE_CARDS = [
   {
-    "id": 1,
-    "lines": [
-      "A locked note. Open it, then work out which wire it means.",
-      "JLWMP YBSZE CBXWH BYR",
-      "LOCK:  KEYWORD.",
-      "CLUE:  The keyword is the surname of the scientist whose second law says force equals mass times acceleration.",
-      "Once opened, the note describes a colour. Name it."
-    ]
+    id: 1,
+    prompt: 'Find the next term in 1, 2, 6, 24, 120, … Count its trailing zeros. That count is your wire number.',
   },
   {
-    "id": 2,
-    "lines": [
-      "Five tags. One correct wire.",
-      "Five wires hang from the device and each wears a tag. Exactly ONE of the five tags is telling the truth, and exactly one wire is the correct one to pull.",
-      "The stop-sign wire’s tag:  “The clear-sky wire’s tag is lying.”",
-      "The coal wire’s tag:  “The clear-sky wire’s tag is telling the truth.”",
-      "The clear-sky wire’s tag:  “The coal wire’s tag is telling the truth.”",
-      "The snow wire’s tag:  “The correct wire is the coal wire or the clear-sky wire.”",
-      "The amethyst wire’s tag:  “The correct wire is NOT the stop-sign wire.”",
-      "Which wire is correct? Name its colour."
-    ]
+    id: 2,
+    trueCount: 1,
+    tags: [
+      { wire: 'RED', colours: ['BLACK', 'PURPLE'] },
+      { wire: 'BLACK', colours: ['WHITE', 'PURPLE'] },
+      { wire: 'BLUE', colours: ['WHITE'], excludes: true },
+      { wire: 'WHITE', colours: ['BLUE'] },
+      { wire: 'PURPLE', colours: ['RED'], excludes: true },
+    ],
   },
   {
-    "id": 3,
-    "lines": [
-      "A locked note. Open it, then work out which wire it means.",
-      "RCJGF VESJN HVJY",
-      "LOCK:  MIRROR, then PUSH N.",
-      "CLUE:  N is the number of black keys in one octave of a piano, plus the number of Great Lakes.",
-      "Once opened, the note describes a colour. Name it."
-    ]
+    id: 3,
+    prompt: 'A barn has chickens and cows. Together they have 9 heads and 22 legs. Use the number of cows as your wire number.',
   },
   {
-    "id": 4,
-    "lines": [
-      "Five tags. One correct wire.",
-      "Five wires hang from the device and each wears a tag. Exactly FOUR of the five tags are telling the truth, and exactly one wire is the correct one to pull.",
-      "The stop-sign wire’s tag:  “The snow wire’s tag is telling the truth.”",
-      "The coal wire’s tag:  “The correct wire is the amethyst wire.”",
-      "The clear-sky wire’s tag:  “The coal wire’s tag is lying.”",
-      "The snow wire’s tag:  “The coal wire’s tag is lying.”",
-      "The amethyst wire’s tag:  “The correct wire is the coal wire or the amethyst wire.”",
-      "Which wire is correct? Name its colour."
-    ]
+    id: 4,
+    trueCount: 2,
+    tags: [
+      { wire: 'RED', colours: ['BLACK'], excludes: true },
+      { wire: 'BLACK', colours: ['WHITE'] },
+      { wire: 'BLUE', colours: ['RED'] },
+      { wire: 'WHITE', colours: ['PURPLE'], excludes: true },
+      { wire: 'PURPLE', colours: ['BLUE', 'BLACK'] },
+    ],
   },
   {
-    "id": 5,
-    "lines": [
-      "A locked note. Open it, then work out which wire it means.",
-      "CRNLA NOSYE OK",
-      "LOCK:  ZIGZAG R.",
-      "CLUE:  R is the number of Fates in Greek mythology.",
-      "Once opened, the note describes a colour. Name it."
-    ]
+    id: 5,
+    prompt: 'Solve x² − 10x + 21 = 0. Use the smaller solution as your wire number.',
+    hint: 'Look for two numbers that add to 10 and multiply to 21.',
   },
   {
-    "id": 6,
-    "lines": [
-      "Five tags. One correct wire.",
-      "Five wires hang from the device and each wears a tag. Exactly TWO of the five tags are telling the truth, and exactly one wire is the correct one to pull.",
-      "The stop-sign wire’s tag:  “The correct wire is the stop-sign wire or the clear-sky wire.”",
-      "The coal wire’s tag:  “The snow wire’s tag is telling the truth.”",
-      "The clear-sky wire’s tag:  “The snow wire’s tag is telling the truth.”",
-      "The snow wire’s tag:  “The clear-sky wire’s tag is telling the truth.”",
-      "The amethyst wire’s tag:  “The correct wire is the clear-sky wire.”",
-      "Which wire is correct? Name its colour."
-    ]
+    id: 6,
+    trueCount: 2,
+    tags: [
+      { wire: 'RED', colours: ['PURPLE'] },
+      { wire: 'BLACK', colours: ['BLUE'] },
+      { wire: 'BLUE', colours: ['WHITE'] },
+      { wire: 'WHITE', colours: ['RED', 'BLACK'] },
+      { wire: 'PURPLE', colours: ['BLUE'] },
+    ],
   },
   {
-    "id": 7,
-    "lines": [
-      "A locked note. Open it, then work out which wire it means.",
-      "QENHG SDLCA VFQON",
-      "LOCK:  KEYWORD.",
-      "CLUE:  The keyword is the surname of the naturalist who wrote On the Origin of Species.",
-      "Once opened, the note describes a colour. Name it."
-    ]
+    id: 7,
+    prompt: 'A polygon’s interior angles add up to 720°. Subtract 2 from its number of sides to get your wire number.',
+    hint: 'For a polygon with n sides, the sum is (n − 2) × 180°.',
   },
   {
-    "id": 8,
-    "lines": [
-      "Five tags. One correct wire.",
-      "Five wires hang from the device and each wears a tag. Exactly TWO of the five tags are telling the truth, and exactly one wire is the correct one to pull.",
-      "The stop-sign wire’s tag:  “The correct wire is the amethyst wire.”",
-      "The coal wire’s tag:  “The snow wire’s tag is lying.”",
-      "The clear-sky wire’s tag:  “The correct wire is the snow wire or the amethyst wire.”",
-      "The snow wire’s tag:  “The stop-sign wire’s tag is lying.”",
-      "The amethyst wire’s tag:  “The coal wire’s tag is telling the truth.”",
-      "Which wire is correct? Name its colour."
-    ]
+    id: 8,
+    trueCount: 3,
+    tags: [
+      { wire: 'RED', colours: ['WHITE'] },
+      { wire: 'BLACK', colours: ['WHITE', 'PURPLE'] },
+      { wire: 'BLUE', colours: ['WHITE'], excludes: true },
+      { wire: 'WHITE', colours: ['BLACK'] },
+      { wire: 'PURPLE', colours: ['RED', 'WHITE'] },
+    ],
   },
   {
-    "id": 9,
-    "lines": [
-      "A locked note. Open it, then work out which wire it means.",
-      "IWEPB KQPCE WQPUV E",
-      "LOCK:  MIRROR, then PUSH N.",
-      "CLUE:  N is the number of planets in the solar system, plus the number of natural moons Earth has.",
-      "Once opened, the note describes a colour. Name it."
-    ]
+    id: 9,
+    prompt: 'At a party, every pair of people shakes hands exactly once. There are 15 handshakes. Subtract 1 from the number of people to get your wire number.',
   },
   {
-    "id": 10,
-    "lines": [
-      "Five tags. One correct wire.",
-      "Five wires hang from the device and each wears a tag. Exactly TWO of the five tags are telling the truth, and exactly one wire is the correct one to pull.",
-      "The stop-sign wire’s tag:  “The clear-sky wire’s tag is telling the truth.”",
-      "The coal wire’s tag:  “The stop-sign wire’s tag is lying.”",
-      "The clear-sky wire’s tag:  “The stop-sign wire’s tag is telling the truth.”",
-      "The snow wire’s tag:  “The correct wire is NOT the amethyst wire.”",
-      "The amethyst wire’s tag:  “The snow wire’s tag is telling the truth.”",
-      "Which wire is correct? Name its colour."
-    ]
-  }
+    id: 10,
+    trueCount: 1,
+    tags: [
+      { wire: 'RED', colours: ['WHITE', 'BLACK'] },
+      { wire: 'BLACK', colours: ['PURPLE'], excludes: true },
+      { wire: 'BLUE', colours: ['WHITE'] },
+      { wire: 'WHITE', colours: ['BLUE', 'BLACK'] },
+      { wire: 'PURPLE', colours: ['BLUE'], excludes: true },
+    ],
+  },
 ];
+
+export function cardNumber(id) {
+  return typeof id === 'number' ? String(id).padStart(2, '0') : id;
+}
+
+export function tagStatement(tag) {
+  return 'Correct wire is ' + (tag.excludes ? 'NOT ' : '') + tag.colours.join(' or ') + '.';
+}

@@ -1,17 +1,20 @@
+import { PRACTICE_CARD } from './expert-manual.js';
+
 export const MORSE = ['-----', '.----', '..---', '...--', '....-', '.....', '-....', '--...', '---..', '----.'];
 export const COLORS = ['RED', 'BLACK', 'BLUE', 'WHITE', 'PURPLE'];
 export const DURATION = 240000;
+export const WIRES_PER_LEVEL = [1, 2, 2];
 export const STORAGE_KEY = 'defuse.scores.v1';
 export function createLevel(level, rng = Math.random) {
   const pool = COLORS.map((_, index) => index);
   for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
-  const required = pool.slice(0, level);
+  const required = pool.slice(0, WIRES_PER_LEVEL[level - 1]);
   return { code: Array.from({ length: 4 }, () => Math.floor(rng() * 10)).join(''), required,
     cards: required.map(c => c * 2 + 1 + Math.floor(rng() * 2)), entry: '', solved: false, wrong: 0, pulled: COLORS.map(() => false) };
 }
 // When a run is driven by the ESP32, the
 // board owns the rules and the clock; `base` is the remaining time (ms) the board last reported at `lastAt`.
-export function initialGame() { return { phase: 'idle', level: 1, remaining: DURATION, attempts: 0, round: null, log: [], team: '', defuser: '', expert: '', message: '', lastAt: null, deadline: null, id: null, device: false, base: 0 }; }
+export function initialGame() { return { phase: 'idle', level: 1, remaining: DURATION, attempts: 0, round: null, log: [], team: '', defuser: '', expert: '', message: '', lastAt: null, deadline: null, id: null, device: false, practice: false, base: 0 }; }
 function log(game, text, tone = 'neutral') { return [{ text, tone, at: game.remaining }, ...game.log].slice(0, 30); }
 // crypto.randomUUID only exists in secure contexts (https or localhost); getRandomValues works everywhere.
 export function makeId() {
@@ -69,6 +72,7 @@ export function applyDeviceSnapshot(game, snapshot, now) {
 
 function finishLevel(game) {
   if (!game.round.solved || !game.round.required.every(i => game.round.pulled[i])) return game;
+  if (game.practice) return { ...game, phase: 'won', message: 'You verified the code and pulled the correct wire.' };
   if (game.level === 3) return { ...game, phase: 'won', deadline: null, message: 'All three levels cleared.', log: log(game, 'Device defused. Mission accomplished.', 'success') };
   return { ...game, phase: 'ready', deadline: null, message: 'Reconnect every wire before continuing.', log: log(game, `Level ${game.level} cleared. Timer paused.`, 'success') };
 }
@@ -76,6 +80,15 @@ export function gameReducer(game, action) {
   if (action.type === 'RESET' || action.type === 'HW_DETACH') return initialGame();
   if (action.type === 'HW_SNAPSHOT') return applyDeviceSnapshot(game, action.snapshot, action.now);
   if (action.type === 'HW_ATTACH') return { ...initialGame(), device: true };
+  if (action.type === 'START_PRACTICE' && !game.device && game.phase === 'idle') {
+    return {
+      ...initialGame(), practice: true, phase: 'playing',
+      round: {
+        code: '0421', required: [PRACTICE_CARD.wireNumber - 1], cards: [PRACTICE_CARD.id],
+        entry: '', solved: false, wrong: 0, pulled: COLORS.map(() => false),
+      },
+    };
+  }
   // The board owns the rules, so simulated inputs must never change a hardware run.
   if (game.device && ['KEY', 'WIRE', 'RECONNECT', 'NEXT', 'START'].includes(action.type)) return game;
   if (action.type === 'START') return { ...initialGame(), ...action.players, phase: 'playing', round: createLevel(1), lastAt: action.now, deadline: action.now + DURATION, id: action.id, log: [{ text: 'Simulation armed. Level 1 started.', tone: 'success', at: DURATION }] };
@@ -87,7 +100,7 @@ export function gameReducer(game, action) {
   if (action.type === 'RECONNECT' && game.phase === 'ready') return { ...game, round: { ...game.round, pulled: game.round.pulled.map((v, i) => i === action.index ? false : v) } };
   if (action.type === 'NEXT' && game.phase === 'ready' && !game.round.pulled.some(Boolean)) return { ...game, phase: 'playing', level: game.level + 1, round: createLevel(game.level + 1), lastAt: action.now, deadline: action.now + game.remaining, message: '', log: log(game, `Level ${game.level + 1} started.`, 'success') };
   if (game.phase !== 'playing') return game;
-  if (['TICK', 'KEY', 'WIRE'].includes(action.type)) {
+  if (!game.practice && ['TICK', 'KEY', 'WIRE'].includes(action.type)) {
     const now = Math.max(game.lastAt, action.now ?? game.lastAt);
     const remaining = Math.max(0, game.deadline - now);
     if (remaining === 0) {
@@ -104,10 +117,14 @@ export function gameReducer(game, action) {
     if (action.key !== '#') return game;
     if (r.entry.length !== 4) return { ...game, message: 'Enter all four digits before submitting.' };
     if (r.entry === r.code) return finishLevel({ ...game, round: { ...r, solved: true, entry: '' }, message: 'Code accepted. Complete the wire module.', log: log(game, 'Access code verified.', 'success') });
+    if (game.practice) return { ...game, round: { ...r, entry: '' }, message: 'That code didn’t match. Read the Morse groups again in order.' };
     const wrong = r.wrong + 1;
     return { ...game, round: { ...r, wrong, entry: '' }, attempts: game.attempts + 1, phase: wrong >= 3 ? 'lost' : 'playing', message: wrong >= 3 ? 'Three incorrect codes in one level.' : `Incorrect code. ${3 - wrong} attempts remaining.`, log: log(game, `Incorrect code (${wrong}/3).`, 'danger') };
   }
   if (action.type === 'WIRE' && Number.isInteger(action.index) && action.index >= 0 && action.index < COLORS.length && !game.round.pulled[action.index]) {
+    if (game.practice && !game.round.required.includes(action.index)) {
+      return { ...game, message: 'Try another wire. Use the answer from Card P and the wire key.' };
+    }
     const r = { ...game.round, pulled: game.round.pulled.map((v, i) => v || i === action.index) };
     if (!r.required.includes(action.index)) return { ...game, round: r, phase: 'lost', message: `Wrong wire pulled: ${COLORS[action.index].toLowerCase()}.`, log: log(game, 'Incorrect wire. Device detonated.', 'danger') };
     return finishLevel({ ...game, round: r, message: 'Correct wire disconnected.', log: log(game, `${COLORS[action.index]} wire disconnected.`, 'success') });

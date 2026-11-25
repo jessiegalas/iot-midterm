@@ -171,6 +171,7 @@ code, kbd, output { font-family: var(--mono); }
 .code-module { grid-area: code; }
 .wire-module { grid-area: wires; border-left: 1px solid var(--line); padding-left: 1.5rem; margin-left: -1.5rem; }
 .console-board[data-playing] {
+  --panel-pad: 1.25rem;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-template-areas: "code timer wires";
   align-items: stretch;
@@ -180,12 +181,17 @@ code, kbd, output { font-family: var(--mono); }
   display: flex;
   flex-direction: column;
   margin: 0;
-  padding: 1.25rem;
+  padding: var(--panel-pad);
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--surface);
 }
-.console-board[data-playing] .code-entry { margin-block: .85rem .5rem; }
+.module-title { font-size: 1.125rem; }
+.wire-heading { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: baseline; gap: .5rem 1rem; }
+.wire-heading .mission-facts { gap: .5rem 1rem; }
+.wire-heading .mission-facts > div { display: flex; gap: .375rem; align-items: baseline; }
+.wire-heading .mission-facts dd { font-size: .9375rem; }
+.console-board[data-playing] .code-entry { margin-block: .75rem .5rem; }
 .console-board[data-playing] .keypad {
   flex: 1 0 auto;
   grid-auto-rows: minmax(3.25rem, 1fr);
@@ -193,24 +199,39 @@ code, kbd, output { font-family: var(--mono); }
 }
 .console-board[data-playing] .keypad button { font-size: 1.0625rem; }
 .console-board[data-playing] .code-module .input-help { margin-top: .85rem; }
-.live-workspace { width: min(100% - 3rem, 82rem); min-height: 100dvh; display: flex; flex-direction: column; justify-content: center; }
+.live-workspace {
+  width: min(100% - 3rem, 82rem);
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-block: 1.5rem;
+}
 .live-countdown {
   --timer-color: #ffc18a;
   grid-area: timer;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr minmax(4.5rem, auto);
   position: relative;
   min-width: 0;
   overflow: clip;
   border: 1px solid #474035;
   border-radius: 7px;
-  padding: 1.25rem;
+  padding: var(--panel-pad);
   background: radial-gradient(ellipse at 50% 35%, #362c1c44, transparent 70%), #1a1d1d;
 }
 .live-countdown::before, .live-countdown::after { content: ''; position: absolute; pointer-events: none; }
 .live-countdown::before { inset: 0; background: repeating-linear-gradient(0deg, transparent 0 3px, #00000012 3px 4px); }
 .live-countdown::after { inset: 8px; border: 1px solid #f8a16a18; border-radius: 3px; }
 .live-countdown[data-urgent] { --timer-color: #ff8f84; border-color: #ab5854; }
+.live-countdown[data-practice] {
+  --timer-color: #83e7a7;
+  border-color: #3b5b4a;
+  background: radial-gradient(ellipse at 50% 35%, #335d4144, transparent 70%), #18231e;
+}
+.live-countdown[data-practice]::after { border-color: #83e7a724; }
+.live-countdown[data-practice] .mission-clock > span:first-child { color: #afd4bb; }
+.live-countdown[data-practice] .clock-value { text-shadow: 0 0 25px #83e7a740; }
 .live-countdown-header { position: relative; display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
 .live-countdown .run-state, .live-countdown .mission-clock > span:first-child {
   font: 500 .75rem / 1.4 var(--mono); text-transform: uppercase; letter-spacing: .065em;
@@ -270,19 +291,17 @@ code, kbd, output { font-family: var(--mono); }
 }
 .live-countdown .mission-clock > span:first-child { grid-row: 2; color: #c9aa7b; }
 .live-countdown .clock-value {
+  position: relative;
   color: var(--timer-color);
-  font-size: clamp(2.5rem, 21cqi, 4rem);
+  font-size: clamp(2rem, 19cqi, 4rem);
   font-weight: 500;
   text-shadow: 0 0 25px #e3975040;
 }
-.clock-fraction { font-size: .28em; color: #d3a67e; letter-spacing: -.02em; margin-left: .15em; }
-.live-countdown .mission-message { position: relative; min-height: 1.25rem; margin-top: 0; text-align: center; }
-[data-playing] .wire-module :is(h2, .mission-facts, .input-help) { text-align: center; }
-[data-playing] .wire-module .mission-facts { justify-content: center; gap: 1.75rem; }
-[data-playing] .wire-module .mission-facts dd { font-size: 1.75rem; }
+.clock-fraction { position: absolute; inset-inline-start: 100%; bottom: .18em; font-size: .28em; color: #d3a67e; letter-spacing: -.02em; margin-inline-start: .15em; }
+.countdown-footer { position: relative; display: grid; justify-items: center; align-content: end; gap: .5rem; text-align: center; }
+.countdown-footer .mission-message { margin: 0; }
+.countdown-footer .mission-message:empty { position: absolute; }
 .mission-facts dd[data-has-strikes] { color: var(--danger); }
-.live-wires-title { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .9rem; font-size: 1rem; }
-.private-clue-button { align-self: center; margin-top: .65rem; }
 .wire-actions {
   display: flex;
   flex-wrap: wrap;
@@ -304,9 +323,10 @@ code, kbd, output { font-family: var(--mono); }
   border-radius: .5rem;
   text-align: center;
 }
-.morse-groups li { min-width: 0; }
+.morse-groups li { display: grid; gap: .2rem; min-width: 0; }
 .morse-groups li + li { border-left: 1px solid var(--line); }
-.morse-groups code { font-size: 1.05rem; font-weight: 600; white-space: nowrap; }
+.morse-position { color: var(--muted); font-size: .75rem; font-weight: 700; }
+.morse-groups code { font-size: clamp(.875rem, 4vw, 1.05rem); font-weight: 600; white-space: nowrap; }
 .code-entry, .wire-summary {
   display: flex;
   align-items: center;
@@ -341,7 +361,7 @@ code, kbd, output { font-family: var(--mono); }
   border-top: 1px solid var(--line);
   list-style: none;
 }
-.console-board[data-playing] .wire-bank { --wire-gutter: 1.25rem; --wire-right-gutter: 1.25rem; }
+.console-board[data-playing] .wire-bank { --wire-gutter: var(--panel-pad); --wire-right-gutter: var(--panel-pad); }
 .wire-row {
   --light: #85efa8;
   --light-glow: #61db8059;
@@ -421,18 +441,41 @@ button.wire-row:not(:disabled):is(:hover, :focus-visible) .wire-label { color: v
 }
 .return-console strong { font-family: var(--mono); color: var(--accent); }
 .manual { max-width: 60rem; }
+.manual .help-steps { margin-top: .75rem; }
+.manual .reference > p, .manual .help-steps { max-width: 75ch; }
 .reference + .reference { border-top: 1px solid var(--line); margin-top: 1.75rem; padding-top: 1.5rem; }
 .morse-reference { display: grid; grid-template-columns: repeat(5, 1fr); gap: .6rem 1rem; margin-top: .85rem; }
 .morse-reference div { display: flex; justify-content: space-between; align-items: center; gap: .5rem; padding: .4rem .55rem; border-bottom: 1px solid var(--line); }
 .morse-reference dt { color: var(--accent); font-weight: 700; }
 .morse-reference code { white-space: nowrap; }
-.riddle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .25rem 1.4rem; margin-top: .65rem; }
-.riddle-grid { align-items: start; }
-.riddle-grid details { border-bottom: 1px solid var(--line); padding-block: .45rem; }
+.riddle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: .25rem 1.25rem; margin-top: .75rem; }
+.riddle-grid details { border-bottom: 1px solid var(--line); padding-block: .25rem; scroll-margin-top: 1rem; }
+.riddle-grid details[open] { border-bottom-color: var(--control-border); padding-bottom: .75rem; }
 .riddle-grid summary { min-height: 2.75rem; padding-block: .55rem; font-weight: 700; }
 .riddle-grid details p { margin: .3rem 0 .7rem; color: var(--muted); overflow-wrap: anywhere; }
-.riddle-grid details code { color: var(--accent); }
-.lock-rules { margin-top: 1rem; color: var(--muted); }
+.manual-wire-key { display: flex; flex-wrap: wrap; gap: .35rem .8rem; margin: .65rem 0; }
+.manual-wire-key div { display: flex; gap: .35rem; align-items: baseline; }
+.manual-wire-key dt { color: var(--accent); font-weight: 700; }
+.manual-wire-key dd, .tag-statements dd { margin: 0; }
+.card-index { display: grid; grid-template-columns: repeat(11, minmax(2.75rem, 1fr)); gap: .5rem; max-width: 36rem; margin: .875rem 0; }
+.card-index a {
+  display: grid;
+  place-items: center;
+  min-height: 2.75rem;
+  border: 1px solid var(--line);
+  border-radius: .5rem;
+  background: var(--inset);
+  color: var(--accent);
+  font: 600 .875rem / 1 var(--mono);
+  text-decoration: none;
+}
+.card-index a:hover { border-color: var(--accent); }
+.tag-statements { display: grid; gap: .3rem; margin: .5rem 0 .9rem; }
+.tag-statements div { display: grid; grid-template-columns: 4.3rem 1fr; gap: .5rem; }
+.tag-statements dt { font-weight: 700; }
+.tag-tally { display: flex; flex-wrap: wrap; gap: .45rem; min-width: 0; margin: 0 0 .65rem; border: 1px solid var(--line); padding: .5rem; }
+.tag-tally label { display: grid; justify-items: start; gap: .2rem; font-size: .75rem; }
+.tag-tally input { width: 3.1rem; min-height: 2.25rem; color: inherit; background: transparent; border: 1px solid var(--line); font: inherit; padding-inline: .35rem; }
 .leaderboard-heading {
   display: flex;
   flex-wrap: wrap;
@@ -522,13 +565,19 @@ button.wire-row:not(:disabled):is(:hover, :focus-visible) .wire-label { color: v
 }
 
 @media (max-width: 29rem) {
-  .podium-panel, .runners-panel { padding: .8rem; }
-  .podium { gap: .3rem; }
-  .podium-icon { width: 3rem; }
-  [data-rank="1"] .podium-icon { width: 3.7rem; }
-  .podium-icon svg, [data-rank="1"] .podium-icon svg { width: 1.35rem; height: 1.35rem; }
+  .rankings-layout { gap: .75rem; }
+  .podium-panel, .runners-panel { padding: .875rem; }
+  .podium { gap: .375rem; margin-top: 1rem; }
+  .podium-place { --step: 2.25rem; }
+  .podium-place[data-rank="1"] { --step: 3rem; }
+  .podium-place[data-rank="3"] { --step: 1.875rem; }
+  .podium-icon { width: 2.375rem; }
+  [data-rank="1"] .podium-icon { width: 2.75rem; }
+  .podium-icon svg, [data-rank="1"] .podium-icon svg { width: 1.125rem; height: 1.125rem; }
+  .podium-details { margin-block: .5rem; }
   .podium-details strong, [data-rank="1"] .podium-details strong { font-size: .875rem; }
   .podium-details p { font-size: .75rem; }
+  .podium-step { font-size: 1.125rem; }
 }
 
 dialog {
@@ -545,13 +594,16 @@ dialog::backdrop { background: #0a1017c9; }
 .dialog-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: .7rem; }
 .dialog-title .icon-button { margin-right: -.4rem; }
 .dialog-content p { margin: .7rem 0; color: var(--muted); }
+.dialog-content .morse-groups { margin-top: 0; }
 .wire-clue-numbers { text-align: center; }
+.wire-clue-numbers strong { font-family: var(--mono); }
 .player-connection-dialog { width: min(100% - 2rem, 42rem); }
 .player-connection-dialog .dialog-title { position: relative; justify-content: center; min-height: 2.75rem; padding-inline: 2.75rem; text-align: center; }
 .player-connection-dialog .dialog-title .icon-button { position: absolute; inset-inline-end: 0; }
-.player-lobby .lobby-intro { max-width: 44ch; margin: .25rem auto .9rem; text-align: center; }
-.lobby-network { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .4rem .65rem; margin-bottom: 1rem; color: var(--muted); font-size: .875rem; }
-.lobby-network select, .lobby-name-fields input, .phone-join input {
+.player-lobby .lobby-intro { max-width: 52ch; margin: 0 auto .875rem; text-align: center; text-wrap: pretty; }
+.lobby-network-settings { display: grid; justify-items: start; gap: .625rem; padding: 0 0 .75rem; }
+.lobby-network { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem .75rem; margin-block: .5rem; color: var(--muted); font-size: .875rem; }
+.lobby-network :is(select, input), .lobby-name-fields input, .phone-join input {
   min-height: 2.75rem;
   min-width: 0;
   max-width: 100%;
@@ -563,25 +615,31 @@ dialog::backdrop { background: #0a1017c9; }
   font: inherit;
 }
 .player-roles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: .65rem; background: var(--inset); }
-.player-role { min-width: 0; padding: 1rem .7rem; text-align: center; }
+.player-role { display: grid; justify-items: center; align-content: start; gap: .5rem; min-width: 0; padding: 1rem .75rem; text-align: center; }
 .player-role + .player-role { border-inline-start: 1px solid var(--line); }
 .player-number { color: var(--muted); font: 500 .8125rem / 1.4 var(--mono); }
-.player-role h3 { margin: .25rem 0 .85rem; font-size: 1.2rem; }
-.player-slot { display: grid; place-items: center; min-height: 9.75rem; }
+.player-role h3 { font-size: 1.125rem; }
+.player-slot { display: grid; place-items: center; width: 100%; min-height: 9.75rem; }
 .player-qr { display: block; width: min(100%, 9.75rem); height: auto; aspect-ratio: 1; border-radius: .35rem; background: white; }
 .player-connected { display: grid; justify-items: center; gap: .35rem; width: 100%; }
-.player-connected strong { font-size: 1.35rem; line-height: 1.2; overflow-wrap: anywhere; }
+.player-connected strong { font-size: 1.15rem; line-height: 1.25; overflow-wrap: anywhere; }
 .player-connected span { color: var(--success); font-weight: 700; font-size: .875rem; }
 .player-waiting { color: var(--muted); font-size: .875rem; }
-.lobby-manual summary { padding: .75rem .25rem; font-weight: 700; }
-.lobby-manual form { padding: .2rem .25rem .9rem; }
+.lobby-manual, .lobby-network-options { border-bottom: 1px solid var(--line); }
+.lobby-manual { margin-top: .5rem; }
+.lobby-manual summary, .lobby-network-options summary { min-height: 2.75rem; padding-block: .625rem; font-weight: 700; }
+.lobby-manual form { padding: .25rem 0 .875rem; }
 .lobby-name-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-bottom: .75rem; }
 .lobby-name-fields label, .phone-join label { display: grid; gap: .35rem; font-weight: 600; }
 .lobby-name-fields input, .phone-join input { width: 100%; }
-.lobby-start { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .65rem; padding-top: .9rem; border-top: 1px solid var(--line); }
-.lobby-start span { color: var(--muted); font-size: .875rem; }
+.player-roles[data-ready] .player-slot { min-height: 0; aspect-ratio: auto; }
+.lobby-start { display: grid; gap: .8rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); text-align: center; }
+.lobby-start .actions { justify-content: center; }
+.player-lobby .lobby-question { margin: 0; color: var(--text); font-size: 1.125rem; font-weight: 700; }
+.player-lobby .lobby-waiting { margin: .625rem 0 0; font-size: .875rem; text-align: center; }
 .player-lobby .lobby-feedback, .phone-join .lobby-feedback { color: var(--danger); }
 .player-lobby .lobby-hint { font-size: .875rem; margin-bottom: 0; }
+.lobby-network-settings .lobby-hint { margin: 0; }
 .phone-join { max-width: 27rem; padding-top: clamp(1.5rem, 7vw, 4rem); }
 .phone-join h1 { margin: .45rem 0 1rem; font-size: 2rem; }
 .phone-join p { margin-block: .65rem; color: var(--muted); overflow-wrap: anywhere; }
@@ -591,6 +649,7 @@ dialog::backdrop { background: #0a1017c9; }
 @media (max-width: 25rem) {
   .player-slot { min-height: 0; aspect-ratio: 1; }
   .player-role { padding-inline: .55rem; }
+  .player-role .button { padding-inline: .55rem; font-size: .875rem; }
   .player-connected strong { font-size: 1.05rem; }
   .lobby-name-fields { grid-template-columns: 1fr; }
   .lobby-start .button { width: 100%; }
@@ -605,6 +664,11 @@ dialog::backdrop { background: #0a1017c9; }
 
 @media (max-width: 63rem) {
   .console-board[data-playing] { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "timer timer" "code wires"; }
+  .live-workspace { min-height: auto; }
+  .countdown-ring { width: min(100%, 12rem); margin-block: .5rem; }
+}
+@media (min-width: 63.01rem) {
+  .console-board[data-playing] { min-block-size: 32rem; }
 }
 
 @media (max-width: 56rem) {
@@ -613,7 +677,6 @@ dialog::backdrop { background: #0a1017c9; }
   .console-board { gap: 1.5rem 2rem; }
   .wire-module { margin-left: -1rem; padding-left: 1rem; }
   .wire-bank { --wire-gutter: 1rem; }
-  .morse-reference { grid-template-columns: repeat(3, 1fr); }
 }
 
 @media (max-width: 42rem) {
@@ -636,11 +699,29 @@ dialog::backdrop { background: #0a1017c9; }
   .console-board { grid-template-areas: "timer" "code" "wires"; }
   .console-board[data-playing] { grid-template-areas: "timer" "code" "wires"; }
   .live-workspace { min-height: auto; }
+  .console-board[data-playing] { --panel-pad: .875rem; }
+  .live-countdown { grid-template-rows: auto 1fr auto; }
+  .countdown-ring { width: min(100%, 10rem); }
+  .dialog-content { padding: 1rem; }
+  .player-connection-dialog .dialog-title { margin-bottom: .375rem; }
+  .player-lobby .lobby-intro { margin-bottom: .625rem; }
+  .player-lobby .lobby-waiting { margin-top: .5rem; }
+  .player-role { padding-block: .625rem; }
+  .player-slot { min-height: 0; }
+  .player-qr { width: min(100%, 7.5rem); }
   .console-board[data-playing] .keypad { grid-auto-rows: minmax(3rem, 1fr); }
   .wire-module { border: 0; border-top: 1px solid var(--line); margin: 0; padding: 1rem 0 0; }
   .wire-bank { --wire-gutter: 0rem; }
-  .morse-reference { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card-index { grid-template-columns: repeat(6, minmax(2.75rem, 1fr)); }
   .riddle-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 35rem) {
+  .morse-reference { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 23rem) {
+  .card-index { grid-template-columns: repeat(4, minmax(2.75rem, 1fr)); }
 }
 
 @media (forced-colors: active) {

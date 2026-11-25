@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { COLORS, createLevel, gameReducer, initialGame, loadScores, rankScores, DURATION } from './game.js';
+import { COLORS, createLevel, gameReducer, initialGame, loadScores, rankScores, recordWin, DURATION } from './game.js';
 const start = () => gameReducer(initialGame(), {type:'START', players:{team:'Test',defuser:'A',expert:'B'},now:1000,id:'run-1'});
 function code(g, digits = g.round.code) { for(const key of digits + '#') g = gameReducer(g,{type:'KEY',key}); return g; }
 function clear(g) { g = code(g); for(const index of g.round.required) g=gameReducer(g,{type:'WIRE',index}); return g; }
@@ -12,7 +12,7 @@ test('a complete three-level run requires reconnecting wires and wins with the s
   for(let level=2; level<=3; level++) {
     for(let index=0; index<COLORS.length; index++) g=gameReducer(g,{type:'RECONNECT',index});
     g=gameReducer(g,{type:'NEXT',now:level*20000});
-    assert.equal(g.level,level); assert.equal(g.round.required.length,level); assert.equal(g.round.wrong,0);
+    assert.equal(g.level,level); assert.equal(g.round.required.length,2); assert.equal(g.round.wrong,0);
     g=clear(g);
   }
   assert.equal(g.phase,'won'); assert.equal(g.remaining,DURATION-10000);
@@ -43,12 +43,29 @@ test('correct code preserves leading zeros and either module can be completed fi
 test('level generation has unique wires and cards with corresponding colors', () => {
   const round = createLevel(3, () => 0);
   assert.equal(round.pulled.length, 5);
-  assert.ok(round.required.includes(3));
+  assert.deepEqual(round.required, [1, 2]);
   assert.ok(createLevel(3, () => .6).required.includes(4));
   for(let level=1;level<=3;level++)for(let n=0;n<30;n++){
-    const r=createLevel(level);assert.equal(new Set(r.required).size,level);assert.match(r.code,/^\d{4}$/);
+    const r=createLevel(level);assert.equal(new Set(r.required).size,Math.min(level, 2));assert.match(r.code,/^\d{4}$/);
     r.cards.forEach((card,i)=>assert.equal(Math.floor((card-1)/2),r.required[i]));
   }
+});
+
+test('the rehearsal is untimed, allows retries, and produces no score', () => {
+  let game = gameReducer(initialGame(), { type: 'START_PRACTICE' });
+  assert.deepEqual(game.round.cards, ['P']);
+  assert.equal(game.deadline, null);
+  assert.equal(gameReducer(game, { type: 'TICK', now: DURATION * 3 }), game);
+  for (let attempt = 0; attempt < 4; attempt++) game = code(game, '0000');
+  assert.equal(game.phase, 'playing');
+  assert.equal(game.attempts, 0);
+  game = gameReducer(game, { type: 'WIRE', index: 0 });
+  assert.equal(game.phase, 'playing');
+  assert.ok(game.round.pulled.every(pulled => !pulled));
+  game = gameReducer(code(game, '0421'), { type: 'WIRE', index: 2 });
+  assert.equal(game.phase, 'won');
+  assert.deepEqual(recordWin([], game, Date.now()), []);
+  assert.deepEqual(gameReducer(game, { type: 'RESET' }), initialGame());
 });
 test('leaderboard sorts by time then errors and filters recent runs', () => {
   const now=1000000000;const rows=[{id:'a',remaining:3000,attempts:2,date:now},{id:'b',remaining:4000,attempts:2,date:now-90000000},{id:'c',remaining:3000,attempts:1,date:now}];
